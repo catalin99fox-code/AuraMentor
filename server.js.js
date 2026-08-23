@@ -476,7 +476,7 @@ async function autorizzaEConsumaMessaggio(deviceId, fingerprintHash, req, option
         return { ok: true, utente, haAbbonamento: true, messaggiRimanenti: -1, vip: true };
     }
 
-    const haAbbonamento = utente.tipo_abbonamento !== 'free'
+    const haAbbonamentoPreliminare = utente.tipo_abbonamento !== 'free'
         && utente.scadenza_abbonamento
         && new Date(utente.scadenza_abbonamento) > new Date();
 
@@ -485,7 +485,7 @@ async function autorizzaEConsumaMessaggio(deviceId, fingerprintHash, req, option
     //  Tutto sbloccato, incluse foto e modalità "solo Pro": è la vetrina
     //  per far vedere tutto il potenziale prima di scegliere un piano.
     // ============================================================
-    if (!haAbbonamento) {
+    if (!haAbbonamentoPreliminare) {
         const esitoFingerprint = await controllaFingerprint(deviceId, fingerprintHash);
         if (esitoFingerprint.bloccato) {
             return {
@@ -537,9 +537,10 @@ async function autorizzaEConsumaMessaggio(deviceId, fingerprintHash, req, option
     // ============================================================
     //  CASO 2: ABBONATO (Base o Pro)
     // ============================================================
+    const haAbbonamento = haAbbonamentoPreliminare;
+    const pianoAttuale = utente.tipo_abbonamento;
 
     // Lucchetto sulle modalità/foto riservate al Pro
-    const pianoAttuale = utente.tipo_abbonamento;
     const modalitaBloccata = modalita && MODALITA_SOLO_PRO.includes(modalita);
     if (pianoAttuale === 'base' && (tipo === 'foto' || modalitaBloccata)) {
         return {
@@ -595,7 +596,6 @@ async function autorizzaEConsumaMessaggio(deviceId, fingerprintHash, req, option
         console.error('❌ Errore conteggio giornaliero per tipo:', countTipoError);
     } else if (contoTipoOggi >= limiteGiornaliero) {
         if (tipo === 'testo' && pianoAttuale === 'base') {
-            // Messaggio di upsell invece del solito blocco secco
             return {
                 ok: false,
                 statusCode: 429,
@@ -1492,7 +1492,7 @@ app.listen(PORT, () => {
     console.log(`🔐 Supabase key: ${process.env.SUPABASE_SERVICE_KEY ? 'service_role ✅' : 'anon/altra (verifica RLS!) ⚠️'}`);
     console.log(`🌍 CORS: ${ALLOWED_ORIGINS.includes('*') ? 'Aperto a tutti (solo sviluppo!)' : ALLOWED_ORIGINS.join(', ')}`);
     console.log(`📦 Cache: ${CACHE_SCADENZA_GIORNI} giorni`);
-    console.log(`📊 Limiti: Base ${LIMITE_BASE_GIORNALIERO}/giorno, Pro ${LIMITE_PRO_GIORNALIERO}/giorno`);
+    console.log(`📊 Limiti testo: Base ${LIMITE_BASE_TESTO_GIORNALIERO}/giorno, Pro ${LIMITE_PRO_TESTO_GIORNALIERO}/giorno — Limite foto Pro: ${LIMITE_PRO_FOTO_GIORNALIERO}/giorno`);
     console.log(`👨‍👩‍👧 Codice accoppiamento: scade dopo ${CODICE_ACCOPPIAMENTO_SCADENZA_MINUTI} minuti`);
     console.log(`🌐 Trust proxy: attivo (necessario per rilevare l'IP reale dietro Scaleway)`);
 });
