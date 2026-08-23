@@ -74,7 +74,7 @@ const MODALITA_INFO = {
     spiegami_concetto: { soloPro: false },
     aiuto_compiti: { soloPro: false },
     interrogami: { soloPro: false },
-    ripasso: { soloPro: false },
+    ripasso: { soloPro: true },
     correggi_compito: { soloPro: true },
     scanner_brutti_voti: { soloPro: true },
 };
@@ -268,7 +268,7 @@ Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, m
             body: JSON.stringify({
                 model: SCALEWAY_MODEL,
                 messages,
-                max_tokens: 1500,
+                max_tokens: 2500,
                 temperature: 0.85,
             }),
         });
@@ -1293,6 +1293,7 @@ async function recuperaStorico(deviceId) {
 // Estrae un eventuale voto predittivo scritto dall'AI nel formato
 // [VOTO_PREDITTIVO: 7.5] e lo separa dal testo mostrato allo studente.
 function estraiVotoPredittivo(testoRisposta) {
+    if (typeof testoRisposta !== 'string') return { testoPulito: testoRisposta || '', voto: null };
     const match = testoRisposta.match(/\[VOTO_PREDITTIVO:\s*([\d.,]+)\]/i);
     if (!match) return { testoPulito: testoRisposta, voto: null };
     const voto = parseFloat(match[1].replace(',', '.'));
