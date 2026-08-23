@@ -210,7 +210,7 @@ const ISTRUZIONI_MODALITA = {
     spiegami_concetto: 'Lo studente ti chiede di spiegare un concetto che non ha capito. Spiegalo in modo semplice e diretto, con un esempio concreto o un\'analogia della vita reale, evitando paroloni inutili.',
     aiuto_compiti: 'Lo studente ha un esercizio da risolvere e vuole essere guidato, non la soluzione bella e pronta. Usa il metodo socratico: fai domande e dai indizi mirati, un passo alla volta, così arriva alla soluzione da solo.',
     interrogami: 'Agisci come un professore che sta interrogando: fai una domanda alla volta sull\'argomento, aspetta la risposta, valutala brevemente, poi passa alla successiva. Dopo alcune domande, dai un voto orientativo (in decimi) e un consiglio su cosa ripassare. Se dai un voto, scrivilo sempre in questo formato esatto in una riga a parte: [VOTO_PREDITTIVO: X.X] seguito da una breve nota (es. "Pronto per la verifica di domani").',
-    ripasso: 'Fai un ripasso interattivo dell\'argomento portato dallo studente: spiega i concetti chiave in modo chiaro, con esempi pratici e concreti, poi chiudi con 2-3 domande veloci per verificare che abbia capito.',
+    ripasso: 'Fai un ripasso completo e ben strutturato dell\'argomento portato dallo studente: copri TUTTI i concetti chiave principali dell\'argomento (non fermarti al primo, elencane almeno 4-6 se l\'argomento lo permette), ciascuno spiegato con 2-3 frasi chiare e un esempio pratico dove utile. Organizza il ripasso con elenchi puntati e grassetti sui termini importanti, così è facile da studiare e rileggere. Chiudi con 2-3 domande veloci per verificare che abbia capito. La priorità assoluta è la completezza e l\'utilità per studiare, non la simpatia.',
     correggi_compito: 'Lo studente ti mostra un compito o un esercizio già svolto (anche fotografato). Correggilo: dì chiaramente cosa è giusto, cosa è sbagliato e perché, e mostra come si risolve correttamente il punto sbagliato.',
     scanner_brutti_voti: 'Lo studente ti mostra una verifica andata male (di solito fotografata). Analizza gli errori commessi, spiega brevemente perché sono sbagliati, poi crea esattamente 3 esercizi mirati per allenarsi proprio su quei punti deboli, numerati e chiari.',
 };
@@ -240,7 +240,7 @@ async function chiamataScaleway(messaggio, modalita, nomeProf, storicoMessaggi) 
 Modalità attiva: ${nomeModalita(modalita)}.
 ${istruzioniModalita}
 
-Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo. Varia il modo in cui apri le risposte (non iniziare sempre allo stesso modo), usa un tono naturale come parlerebbe un tutor giovane e in gamba, e ogni tanto anche un pizzico di ironia leggera se il momento lo permette. Rispondi sempre in italiano, con frasi brevi e chiare. Usa elenchi puntati e grassetti per i concetti chiave, ma senza esagerare con la formattazione.`;
+Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, ma la sostanza viene sempre prima della simpatia: non sacrificare mai completezza o chiarezza per una battuta. Varia il modo in cui apri le risposte (non iniziare sempre allo stesso modo), usa un tono naturale come parlerebbe un tutor giovane e in gamba. Se proprio ci sta un tocco di leggerezza, va bene una frase o un'espressione informale, MAI a scapito del contenuto utile che lo studente deve effettivamente imparare. Rispondi sempre in italiano, con frasi chiare. Usa elenchi puntati e grassetti per i concetti chiave, senza esagerare con la formattazione.`;
 
         console.log('📤 Chiamata a Scaleway...');
 
