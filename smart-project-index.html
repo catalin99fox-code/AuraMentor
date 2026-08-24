@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart Project — Servizi e soluzioni digitali</title>
+<meta name="description" content="Smart Project, con sede a Moncalieri (TO). Servizi e soluzioni digitali, tra cui Aura Mentor.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Work+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --crema: #FAF8F5;
+    --carta: #FFFFFF;
+    --inchiostro: #1E1B24;
+    --inchiostro-tenue: #5B5568;
+    --prugna: #5B3A8E;
+    --prugna-scura: #402969;
+    --prugna-chiara: #EFE9F7;
+    --bordo: #E7E1EF;
+    --ombra: 0 10px 30px -12px rgba(64, 41, 105, 0.15);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: 'Work Sans', sans-serif;
+    background: var(--crema);
+    color: var(--inchiostro);
+    line-height: 1.6;
+  }
+  h1, h2, .display { font-family: 'Source Serif 4', serif; font-weight: 700; line-height: 1.15; margin: 0; }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 0 24px; }
+
+  header {
+    padding: 20px 0;
+    border-bottom: 1px solid var(--bordo);
+  }
+  header .wrap { display: flex; align-items: center; justify-content: space-between; }
+  .logo { font-family: 'Source Serif 4', serif; font-weight: 700; font-size: 20px; color: var(--prugna-scura); }
+  nav a { color: var(--inchiostro-tenue); text-decoration: none; font-size: 14px; font-weight: 500; margin-left: 24px; }
+  nav a:first-child { color: var(--prugna); font-weight: 700; margin-left: 0; }
+  nav a:hover { color: var(--prugna); }
+
+  .hero { padding: 80px 0 60px; text-align: center; }
+  .hero .eyebrow {
+    display: inline-block; background: var(--prugna-chiara); color: var(--prugna-scura);
+    padding: 6px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; margin-bottom: 22px;
+  }
+  .hero h1 { font-size: clamp(28px, 5vw, 40px); }
+  .hero p.sub { max-width: 520px; margin: 20px auto 0; font-size: 17px; color: var(--inchiostro-tenue); }
+
+  .sezione { padding: 50px 0; }
+  .sezione h2 { font-size: 24px; margin-bottom: 20px; }
+
+  .servizi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  @media (max-width: 640px) { .servizi-grid { grid-template-columns: 1fr; } }
+  .servizio-card {
+    background: var(--carta); border: 1px solid var(--bordo); border-radius: 16px;
+    padding: 22px; box-shadow: var(--ombra);
+  }
+  .servizio-card .icona { font-size: 26px; margin-bottom: 10px; }
+  .servizio-card h3 { font-size: 16px; font-weight: 700; margin-bottom: 6px; font-family: 'Work Sans', sans-serif; }
+  .servizio-card p { font-size: 13.5px; color: var(--inchiostro-tenue); margin: 0; }
+
+  .progetto-box {
+    background: var(--prugna-scura); color: white; border-radius: 20px;
+    padding: 34px; display: flex; align-items: center; gap: 24px; flex-wrap: wrap;
+  }
+  .progetto-box .testo { flex: 1; min-width: 240px; }
+  .progetto-box h3 { font-size: 20px; color: white; margin-bottom: 8px; font-family: 'Source Serif 4', serif; }
+  .progetto-box p { color: #D9CFEA; font-size: 14.5px; margin: 0 0 16px; }
+  .progetto-box a {
+    display: inline-block; background: white; color: var(--prugna-scura);
+    padding: 10px 20px; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 14px;
+  }
+
+  .contatti-box {
+    background: var(--carta); border: 1px solid var(--bordo); border-radius: 16px; padding: 28px;
+  }
+  .contatti-box a { color: var(--prugna); text-decoration: none; font-weight: 600; }
+
+  footer {
+    border-top: 1px solid var(--bordo); padding: 30px 24px 40px; margin-top: 40px;
+    text-align: center; color: var(--inchiostro-tenue); font-size: 12.5px; line-height: 1.8;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="logo">Smart Project</div>
+    <nav>
+      <a href="aura-mentor.html">Aura Mentor</a>
+      <a href="#servizi">Servizi</a>
+      <a href="#progetti">Progetti</a>
+      <a href="#contatti">Contatti</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <span class="eyebrow">Servizi e soluzioni digitali</span>
+    <h1>Smart Project</h1>
+    <p class="sub">Con sede a Moncalieri (TO), attiva nello sviluppo di soluzioni digitali e servizi su misura.</p>
+  </div>
+</section>
+
+<section class="sezione" id="servizi">
+  <div class="wrap">
+    <h2>Cosa facciamo</h2>
+    <div class="servizi-grid">
+      <div class="servizio-card">
+        <div class="icona">💻</div>
+        <h3>Sviluppo software</h3>
+        <p>Applicazioni web e mobile su misura, dalla progettazione alla messa online.</p>
+      </div>
+      <div class="servizio-card">
+        <div class="icona">🤝</div>
+        <h3>Consulenza digitale</h3>
+        <p>Supporto nella scelta e nell'implementazione di strumenti e servizi digitali.</p>
+      </div>
+      <div class="servizio-card">
+        <div class="icona">📈</div>
+        <h3>Progetti innovativi</h3>
+        <p>Sviluppo di prodotti propri, dall'idea al lancio sul mercato.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="sezione" id="progetti">
+  <div class="wrap">
+    <h2>I nostri progetti</h2>
+    <div class="progetto-box">
+      <div class="testo">
+        <h3>Aura Mentor</h3>
+        <p>Tutor scolastico personale basato su intelligenza artificiale, pensato per aiutare gli studenti nello studio quotidiano.</p>
+        <a href="aura-mentor.html">Scopri di più e scarica l'app →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="sezione" id="contatti">
+  <div class="wrap">
+    <h2>Contatti</h2>
+    <div class="contatti-box">
+      <p style="margin:0 0 10px;">Per qualsiasi informazione, scrivici:</p>
+      <p style="margin:0;"><a href="mailto:infosmartproject@yahoo.it">infosmartproject@yahoo.it</a></p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <strong>Smart Project</strong><br>
+    Sede: Strada Mongina 9/17, 10024 Moncalieri (TO), Italia<br>
+    Partita IVA: 10653050012 — REA TO-1151296<br>
+    Iscritta dal 18/01/2012<br><br>
+    <a href="privacy-policy.html">Privacy Policy</a> · <a href="termini-servizio.html">Termini di Servizio</a>
+  </div>
+</footer>
+
+</body>
+</html>
