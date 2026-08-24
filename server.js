@@ -60,10 +60,10 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
 //  COSTANTI
 // ============================================================
 const LIMITE_MESSAGGI_GRATIS = 10; // prova gratuita: tutto sbloccato, incluse le foto
-const LIMITE_BASE_TESTO_GIORNALIERO = 15;
-const LIMITE_PRO_TESTO_GIORNALIERO = 35;
-const LIMITE_PRO_FOTO_GIORNALIERO = 15; // il Base non ha accesso alle foto: nessun limite da definire
-const LIMITE_ASSOLUTO_GIORNALIERO = 50; // tetto di sicurezza "fair usage", indipendente dal piano
+const LIMITE_BASE_TESTO_SETTIMANALE = 105; // 15/giorno equivalente, ma usabile liberamente nella settimana
+const LIMITE_PRO_TESTO_SETTIMANALE = 245; // 35/giorno equivalente
+const LIMITE_PRO_FOTO_SETTIMANALE = 105; // 15/giorno equivalente; il Base non ha accesso alle foto
+const LIMITE_ASSOLUTO_GIORNALIERO = 50; // tetto di sicurezza "fair usage" ANTI-ABUSO, resta per giorno singolo
 const MAX_LEN_MESSAGGIO = 4000;
 const MAX_LEN_NOME_PROF = 30;
 
@@ -576,34 +576,39 @@ async function autorizzaEConsumaMessaggio(deviceId, fingerprintHash, req, option
         };
     }
 
-    // Limite giornaliero specifico per piano + tipo (testo o foto)
-    let limiteGiornaliero;
+    // Limite SETTIMANALE (non più giornaliero) specifico per piano + tipo (testo o foto).
+    // Lo studente può usarlo come vuole durante la settimana (es. tutto nel weekend),
+    // invece di perdere le domande dei giorni in cui non ha usato l'app.
+    let limiteSettimanale;
     if (tipo === 'foto') {
-        limiteGiornaliero = LIMITE_PRO_FOTO_GIORNALIERO; // il Base è già bloccato sopra
+        limiteSettimanale = LIMITE_PRO_FOTO_SETTIMANALE; // il Base è già bloccato sopra
     } else {
-        limiteGiornaliero = pianoAttuale === 'pro' ? LIMITE_PRO_TESTO_GIORNALIERO : LIMITE_BASE_TESTO_GIORNALIERO;
+        limiteSettimanale = pianoAttuale === 'pro' ? LIMITE_PRO_TESTO_SETTIMANALE : LIMITE_BASE_TESTO_SETTIMANALE;
     }
 
-    const { count: contoTipoOggi, error: countTipoError } = await supabase
+    const seteGiorniFa = new Date();
+    seteGiorniFa.setDate(seteGiorniFa.getDate() - 7);
+
+    const { count: contoTipoSettimana, error: countTipoError } = await supabase
         .from('chat_messages')
         .select('id', { count: 'exact', head: true })
         .eq('device_id', deviceId)
         .eq('role', 'user')
         .eq('tipo', tipo)
-        .gte('created_at', oggi);
+        .gte('created_at', seteGiorniFa.toISOString());
 
     if (countTipoError) {
-        console.error('❌ Errore conteggio giornaliero per tipo:', countTipoError);
-    } else if (contoTipoOggi >= limiteGiornaliero) {
+        console.error('❌ Errore conteggio settimanale per tipo:', countTipoError);
+    } else if (contoTipoSettimana >= limiteSettimanale) {
         if (tipo === 'testo' && pianoAttuale === 'base') {
             return {
                 ok: false,
                 statusCode: 429,
                 body: {
                     status: 'LIMITE_GIORNALIERO_UPSELL',
-                    messaggio: 'Hai dato il massimo oggi! 🎉 Con il piano Pro hai la possibilità di continuare a studiare, più la possibilità di fotografare i tuoi esercizi. Vuoi dare un\'occhiata?',
+                    messaggio: 'Hai dato il massimo questa settimana! 🎉 Con il piano Pro hai la possibilità di continuare a studiare, più la possibilità di fotografare i tuoi esercizi. Vuoi dare un\'occhiata?',
                     messaggiRimanenti: 0,
-                    limite: limiteGiornaliero,
+                    limite: limiteSettimanale,
                 }
             };
         }
@@ -612,7 +617,7 @@ async function autorizzaEConsumaMessaggio(deviceId, fingerprintHash, req, option
             statusCode: 429,
             body: {
                 status: 'LIMITE_GIORNALIERO',
-                messaggio: `Hai raggiunto il limite giornaliero del piano ${pianoAttuale === 'pro' ? 'Pro' : 'Base'}. Torna domani!`,
+                messaggio: `Hai raggiunto il limite settimanale del piano ${pianoAttuale === 'pro' ? 'Pro' : 'Base'}. Il conteggio si aggiorna giorno per giorno, torna a trovarci presto!`,
                 messaggiRimanenti: 0,
                 limite: limiteGiornaliero,
             }
@@ -1493,7 +1498,7 @@ app.listen(PORT, () => {
     console.log(`🔐 Supabase key: ${process.env.SUPABASE_SERVICE_KEY ? 'service_role ✅' : 'anon/altra (verifica RLS!) ⚠️'}`);
     console.log(`🌍 CORS: ${ALLOWED_ORIGINS.includes('*') ? 'Aperto a tutti (solo sviluppo!)' : ALLOWED_ORIGINS.join(', ')}`);
     console.log(`📦 Cache: ${CACHE_SCADENZA_GIORNI} giorni`);
-    console.log(`📊 Limiti testo: Base ${LIMITE_BASE_TESTO_GIORNALIERO}/giorno, Pro ${LIMITE_PRO_TESTO_GIORNALIERO}/giorno — Limite foto Pro: ${LIMITE_PRO_FOTO_GIORNALIERO}/giorno`);
+    console.log(`📊 Limiti settimanali testo: Base ${LIMITE_BASE_TESTO_SETTIMANALE}/settimana, Pro ${LIMITE_PRO_TESTO_SETTIMANALE}/settimana — Foto Pro: ${LIMITE_PRO_FOTO_SETTIMANALE}/settimana — Tetto anti-abuso: ${LIMITE_ASSOLUTO_GIORNALIERO}/giorno`);
     console.log(`👨‍👩‍👧 Codice accoppiamento: scade dopo ${CODICE_ACCOPPIAMENTO_SCADENZA_MINUTI} minuti`);
     console.log(`🌐 Trust proxy: attivo (necessario per rilevare l'IP reale dietro Scaleway)`);
 });
