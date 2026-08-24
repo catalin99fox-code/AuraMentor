@@ -12,6 +12,7 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
+const { google } = require('googleapis'); // per verificare gli acquisti Google Play Billing
 require('dotenv').config();
 
 const app = express();
@@ -30,6 +31,9 @@ const SCALEWAY_API_KEY = process.env.DEEPSEEK_API_KEY;
 
 const SCALEWAY_BASE_URL = 'https://api.scaleway.ai/v1';
 const SCALEWAY_MODEL = process.env.SCALEWAY_MODEL || 'deepseek-v4-flash';
+// Solo per modelli con "reasoning" configurabile (es. gpt-oss-120b): 'low' | 'medium' | 'high'.
+// Lascia vuoto/non impostato per modelli come DeepSeek che non lo supportano.
+const SCALEWAY_REASONING_EFFORT = process.env.SCALEWAY_REASONING_EFFORT || '';
 
 // NUOVO: configurazione OpenAI per la lettura delle foto (foto -> testo)
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -38,14 +42,66 @@ const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini';
 
 // NUOVO: configurazione Revolut Business (pagamenti genitori)
 // Vanno configurate su .env quando l'account Revolut Business è pronto:
-// REVOLUT_SECRET_KEY, REVOLUT_WEBHOOK_SECRET, REVOLUT_PLAN_BASE_ID, REVOLUT_PLAN_PRO_ID
-const REVOLUT_SECRET_KEY = process.env.REVOLUT_SECRET_KEY;
-const REVOLUT_WEBHOOK_SECRET = process.env.REVOLUT_WEBHOOK_SECRET;
-const REVOLUT_BASE_URL = process.env.REVOLUT_BASE_URL || 'https://merchant.revolut.com/api';
-const REVOLUT_PLAN_BASE_ID = process.env.REVOLUT_PLAN_BASE_ID;
-const REVOLUT_PLAN_PRO_ID = process.env.REVOLUT_PLAN_PRO_ID;
+// NUOVO: configurazione Google Play Billing (verifica acquisti/abbonamenti)
+// GOOGLE_PACKAGE_NAME: il nome del pacchetto Android (es. com.smartproject.auramentor),
+// lo trovi in android/app/build.gradle.kts alla voce applicationId.
+// GOOGLE_SERVICE_ACCOUNT_JSON: il contenuto INTERO del file JSON della chiave di
+// servizio Google Cloud (Setup → API access su Play Console), incollato come
+// stringa su una riga sola nel .env.
+const GOOGLE_PACKAGE_NAME = process.env.GOOGLE_PACKAGE_NAME || '';
+const GOOGLE_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '';
+
+// ID prodotto → piano interno. Devono corrispondere ESATTAMENTE agli ID creati
+// su Play Console in Monetizzazione → Prodotti in abbonamento.
+const PIANO_PER_PRODOTTO_GOOGLE = {
+    base_mensile: 'base',
+    pro_mensile: 'pro',
+};
+
+let googlePlayClient = null;
+function ottieniClienteGooglePlay() {
+    if (googlePlayClient) return googlePlayClient;
+    if (!GOOGLE_SERVICE_ACCOUNT_JSON) return null;
+    try {
+        const credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
+        const auth = new google.auth.GoogleAuth({
+            credentials,
+            scopes: ['https://www.googleapis.com/auth/androidpublisher'],
+        });
+        googlePlayClient = google.androidpublisher({ version: 'v3', auth });
+        return googlePlayClient;
+    } catch (error) {
+        console.error('❌ GOOGLE_SERVICE_ACCOUNT_JSON non valido:', error.message);
+        return null;
+    }
+}
+
+// Verifica un acquisto/abbonamento presso Google Play. Ritorna se è valido
+// e, per gli abbonamenti, quando scade — così non ci si fida mai del solo
+// client (chiunque potrebbe altrimenti "finger" di aver pagato).
+async function verificaAcquistoGoogle(productId, purchaseToken) {
+    const client = ottieniClienteGooglePlay();
+    if (!client || !GOOGLE_PACKAGE_NAME) {
+        return { ok: false, motivo: 'Verifica Google Play non configurata sul server.' };
+    }
+    try {
+        const risposta = await client.purchases.subscriptions.get({
+            packageName: GOOGLE_PACKAGE_NAME,
+            subscriptionId: productId,
+            token: purchaseToken,
+        });
+        const dati = risposta.data;
+        // paymentState: 1 = pagamento ricevuto, 2 = prova gratuita attiva
+        const valido = dati.paymentState === 1 || dati.paymentState === 2;
+        const scadenza = dati.expiryTimeMillis ? new Date(parseInt(dati.expiryTimeMillis, 10)) : null;
+        return { ok: valido, scadenza };
+    } catch (error) {
+        console.error('❌ Errore verifica Google Play:', error.message);
+        return { ok: false, motivo: 'Impossibile verificare l\'acquisto con Google.' };
+    }
+}
 // Dove atterra il genitore dopo il pagamento (pagina web statica, non su questo server)
-const LANDING_PAGE_URL = process.env.LANDING_PAGE_URL || 'https://TUO-DOMINIO/attiva';
+// (LANDING_PAGE_URL non più necessaria: i pagamenti passano da Google Play Billing)
 
 // NUOVO: canale opzionale per avvisarvi di segnali di rischio rilevati (Slack/Telegram/Discord
 // webhook in stile "incoming webhook" che accetta { text: '...' } o { content: '...' }).
@@ -259,18 +315,27 @@ Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, m
 
         messages.push({ role: 'user', content: messaggio });
 
+        // reasoning_effort: usato solo dai modelli che supportano il "pensiero"
+        // interno (es. gpt-oss-120b). Su DeepSeek V4 Flash viene ignorato senza
+        // causare errori. "low" tiene il modello veloce ed economico per una
+        // chat scolastica normale; puoi alzarlo da .env se serve più precisione.
+        const corpoRichiesta = {
+            model: SCALEWAY_MODEL,
+            messages,
+            max_tokens: 2500,
+            temperature: 0.85,
+        };
+        if (SCALEWAY_REASONING_EFFORT) {
+            corpoRichiesta.reasoning_effort = SCALEWAY_REASONING_EFFORT;
+        }
+
         const response = await fetch(`${SCALEWAY_BASE_URL}/chat/completions`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${SCALEWAY_API_KEY}`,
             },
-            body: JSON.stringify({
-                model: SCALEWAY_MODEL,
-                messages,
-                max_tokens: 2500,
-                temperature: 0.85,
-            }),
+            body: JSON.stringify(corpoRichiesta),
         });
 
         if (!response.ok) {
@@ -630,6 +695,38 @@ async function autorizzaEConsumaMessaggio(deviceId, fingerprintHash, req, option
 // ============================================================
 //  API: REGISTRA FINGERPRINT (chiamata esplicita, es. all'avvio app)
 // ============================================================
+// ============================================================
+//  NUOVA API: REGISTRA CONSENSO (Privacy Policy + Termini)
+//  Chiamata una sola volta, al primo completamento dell'onboarding.
+//  Serve come prova della data di accettazione, in caso di controlli.
+// ============================================================
+app.post('/api/registra-consenso', async (req, res) => {
+    const { deviceId } = req.body;
+
+    if (!deviceId || typeof deviceId !== 'string') {
+        return res.status(400).json({ error: 'deviceId mancante o non valido' });
+    }
+
+    try {
+        const { error } = await supabase
+            .from('users')
+            .upsert({
+                device_id: deviceId,
+                consenso_termini_il: new Date().toISOString(),
+            }, { onConflict: 'device_id', ignoreDuplicates: false });
+
+        if (error) {
+            console.error('❌ Errore registrazione consenso:', error);
+            return res.status(500).json({ error: 'Errore interno' });
+        }
+
+        res.json({ status: 'OK' });
+    } catch (error) {
+        console.error('❌ Errore registra-consenso:', error);
+        res.status(500).json({ error: 'Errore interno' });
+    }
+});
+
 app.post('/api/registra-fingerprint', async (req, res) => {
     const { deviceId, fingerprint } = req.body;
 
@@ -750,7 +847,14 @@ app.post('/api/genera-codice', async (req, res) => {
 //  di pagamento reale — da usare solo per debug admin) sia dal webhook di
 //  Revolut dopo un pagamento confermato (flusso reale).
 // ============================================================
-async function attivaAbbonamentoGenitore({ deviceId, emailGenitore, telefonoGenitore, pianoScelto }) {
+// ============================================================
+//  FUNZIONE CONDIVISA: COLLEGA UN GENITORE A UN DEVICE (per la dashboard)
+//  Da qui in poi l'abbonamento si attiva SOLO tramite Google Play Billing
+//  (endpoint /api/verifica-acquisto-google) — questa funzione serve solo
+//  a dare al genitore accesso alla dashboard di monitoraggio, che è una
+//  cosa distinta dal pagamento.
+// ============================================================
+async function collegaGenitoreADevice({ deviceId, emailGenitore, telefonoGenitore }) {
     const dashboardToken = generaTokenSicuro();
 
     const { error: insertGenitoreError } = await supabase
@@ -759,7 +863,6 @@ async function attivaAbbonamentoGenitore({ deviceId, emailGenitore, telefonoGeni
             email_genitore: emailGenitore,
             telefono_genitore: telefonoGenitore || null,
             device_id_figlio: deviceId,
-            piano_attivo: pianoScelto,
             dashboard_token: dashboardToken
         });
 
@@ -767,14 +870,10 @@ async function attivaAbbonamentoGenitore({ deviceId, emailGenitore, telefonoGeni
         return { ok: false, errore: insertGenitoreError };
     }
 
-    const scadenza = new Date();
-    scadenza.setMonth(scadenza.getMonth() + 1);
-
+    // Il codice è "consumato": lo invalidiamo per impedirne il riuso
     const { error: updateUserError } = await supabase
         .from('users')
         .update({
-            tipo_abbonamento: pianoScelto,
-            scadenza_abbonamento: scadenza.toISOString(),
             codice_accoppiamento: null,
             codice_generato_il: null
         })
@@ -788,16 +887,13 @@ async function attivaAbbonamentoGenitore({ deviceId, emailGenitore, telefonoGeni
 }
 
 app.post('/api/accoppia-genitore', async (req, res) => {
-    const { emailGenitore, codiceInserito, pianoScelto } = req.body;
+    const { emailGenitore, telefonoGenitore, codiceInserito } = req.body;
 
     if (!emailGenitore || typeof emailGenitore !== 'string') {
         return res.status(400).json({ error: 'emailGenitore mancante o non valida' });
     }
     if (!codiceInserito || typeof codiceInserito !== 'string') {
         return res.status(400).json({ error: 'codiceInserito mancante o non valido' });
-    }
-    if (!pianoScelto || !['base', 'pro'].includes(pianoScelto)) {
-        return res.status(400).json({ error: 'pianoScelto non valido (deve essere "base" o "pro")' });
     }
 
     try {
@@ -829,20 +925,20 @@ app.post('/api/accoppia-genitore', async (req, res) => {
             }
         }
 
-        const risultato = await attivaAbbonamentoGenitore({
+        const risultato = await collegaGenitoreADevice({
             deviceId: utente.device_id,
             emailGenitore,
-            pianoScelto,
+            telefonoGenitore,
         });
 
         if (!risultato.ok) {
-            console.error('❌ Errore attivazione abbonamento (manuale):', risultato.errore);
+            console.error('❌ Errore collegamento genitore:', risultato.errore);
             return res.status(500).json({ error: 'Errore interno' });
         }
 
         res.json({
             success: true,
-            messaggio: 'Abbonamento attivato!',
+            messaggio: 'Collegamento riuscito! Ora hai accesso alla dashboard di monitoraggio.',
             dashboardToken: risultato.dashboardToken
         });
 
@@ -852,220 +948,67 @@ app.post('/api/accoppia-genitore', async (req, res) => {
     }
 });
 
-// ============================================================
-//  NUOVA API: CREA ORDINE DI PAGAMENTO (avvia il checkout Revolut)
-//  Chiamata dalla landing page quando il genitore sceglie un piano.
-//  Crea un ordine "in sospeso" e rimanda a Revolut per il pagamento vero:
-//  l'abbonamento NON viene attivato qui, solo dopo conferma via webhook.
-//
-//  ⚠️ RICHIEDE che tu abbia già configurato REVOLUT_SECRET_KEY,
-//  REVOLUT_PLAN_BASE_ID e REVOLUT_PLAN_PRO_ID nel file .env (li ottieni
-//  dal pannello Revolut Business dopo aver creato i due piani).
-// ============================================================
-app.post('/api/crea-ordine-pagamento', async (req, res) => {
-    const { codiceInserito, emailGenitore, telefonoGenitore, pianoScelto } = req.body;
-
-    if (!codiceInserito || typeof codiceInserito !== 'string') {
-        return res.status(400).json({ error: 'codiceInserito mancante o non valido' });
-    }
-    if (!emailGenitore || typeof emailGenitore !== 'string') {
-        return res.status(400).json({ error: 'emailGenitore mancante o non valida' });
-    }
-    if (!pianoScelto || !['base', 'pro'].includes(pianoScelto)) {
-        return res.status(400).json({ error: 'pianoScelto non valido' });
-    }
-    if (!REVOLUT_SECRET_KEY || !REVOLUT_PLAN_BASE_ID || !REVOLUT_PLAN_PRO_ID) {
-        console.error('❌ Revolut non configurato: mancano REVOLUT_SECRET_KEY o gli ID dei piani nel .env');
-        return res.status(503).json({ error: 'Pagamenti non ancora disponibili. Riprova più tardi.' });
-    }
-
-    try {
-        const { data: utente, error: fetchError } = await supabase
-            .from('users')
-            .select('device_id, codice_generato_il')
-            .eq('codice_accoppiamento', codiceInserito)
-            .maybeSingle();
-
-        if (fetchError) {
-            console.error('❌ Errore lettura codice:', fetchError);
-            return res.status(500).json({ error: 'Errore interno' });
-        }
-        if (!utente) {
-            return res.status(404).json({ error: 'Codice non valido o scaduto' });
-        }
-        if (utente.codice_generato_il) {
-            const minutiPassati = (new Date() - new Date(utente.codice_generato_il)) / (1000 * 60);
-            if (minutiPassati > CODICE_ACCOPPIAMENTO_SCADENZA_MINUTI) {
-                return res.status(410).json({ error: 'Codice scaduto. Chiedi a tuo figlio di generarne uno nuovo.' });
-            }
-        }
-
-        const idOrdine = generaTokenSicuro(12);
-
-        const { error: insertOrdineError } = await supabase
-            .from('ordini_pendenti')
-            .insert({
-                id: idOrdine,
-                device_id: utente.device_id,
-                email_genitore: emailGenitore,
-                telefono_genitore: telefonoGenitore || null,
-                piano_scelto: pianoScelto,
-                stato: 'in_attesa',
-            });
-
-        if (insertOrdineError) {
-            console.error('❌ Errore creazione ordine pendente:', insertOrdineError);
-            return res.status(500).json({ error: 'Errore interno' });
-        }
-
-        const planId = pianoScelto === 'pro' ? REVOLUT_PLAN_PRO_ID : REVOLUT_PLAN_BASE_ID;
-
-        // Chiamata all'API Subscriptions di Revolut per creare l'abbonamento
-        // e ottenere l'URL della pagina di pagamento ospitata. La forma esatta
-        // della richiesta va verificata sulla documentazione Revolut al
-        // momento dell'integrazione reale (developer.revolut.com/docs/merchant/subscriptions):
-        // questo è un punto di partenza corretto nella struttura, da testare
-        // con le tue chiavi vere prima di andare in produzione.
-        const revolutResponse = await fetch(`${REVOLUT_BASE_URL}/subscriptions`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${REVOLUT_SECRET_KEY}`,
-            },
-            body: JSON.stringify({
-                plan_id: planId,
-                metadata: { ordine_id: idOrdine },
-                redirect_url: `${LANDING_PAGE_URL}/successo?ordine=${idOrdine}`,
-            }),
-        });
-
-        if (!revolutResponse.ok) {
-            const errorText = await revolutResponse.text();
-            console.error('❌ Errore creazione abbonamento Revolut:', revolutResponse.status, errorText);
-            return res.status(502).json({ error: 'Impossibile avviare il pagamento. Riprova più tardi.' });
-        }
-
-        const datiRevolut = await revolutResponse.json();
-
-        res.json({
-            success: true,
-            ordineId: idOrdine,
-            // Il nome esatto del campo con l'URL di checkout va confermato
-            // dalla risposta reale di Revolut quando testi con le tue chiavi.
-            checkoutUrl: datiRevolut.checkout_url || datiRevolut.hosted_page_url || null,
-        });
-
-    } catch (error) {
-        console.error('❌ Errore crea-ordine-pagamento:', error);
-        res.status(500).json({ error: 'Errore interno' });
-    }
-});
-
-// ============================================================
-//  NUOVA API: WEBHOOK REVOLUT (conferma pagamento -> attiva abbonamento)
-//  Revolut chiama QUESTO endpoint quando un pagamento va a buon fine.
-//  Non fidarti mai di un webhook senza verificarne l'autenticità: qui va
-//  verificata la firma con REVOLUT_WEBHOOK_SECRET secondo la documentazione
-//  ufficiale (il nome esatto dell'header/algoritmo va confermato quando
-//  configuri il webhook nel pannello Revolut).
-// ============================================================
-app.post('/api/webhook-revolut', async (req, res) => {
-    if (!REVOLUT_WEBHOOK_SECRET) {
-        console.error('❌ Webhook Revolut ricevuto ma REVOLUT_WEBHOOK_SECRET non configurato: rifiutato.');
-        return res.status(503).json({ error: 'Webhook non configurato' });
-    }
-
-    // TODO quando configuri Revolut: verificare qui la firma della richiesta
-    // (header tipo 'Revolut-Signature') con crypto.createHmac usando
-    // REVOLUT_WEBHOOK_SECRET, prima di fidarsi del contenuto del body.
-
-    const evento = req.body;
-    const tipoEvento = evento?.event;
-    const ordineId = evento?.data?.metadata?.ordine_id || evento?.metadata?.ordine_id;
-
-    if (!ordineId) {
-        console.warn('⚠️ Webhook Revolut senza ordine_id nei metadata, ignorato.');
-        return res.status(200).json({ ricevuto: true });
-    }
-
-    if (tipoEvento !== 'ORDER_COMPLETED' && tipoEvento !== 'SUBSCRIPTION_ACTIVATED') {
-        // Altri eventi (pagamento fallito, ecc.): logghiamo e basta per ora.
-        console.log(`ℹ️ Webhook Revolut ricevuto: ${tipoEvento} per ordine ${ordineId}`);
-        return res.status(200).json({ ricevuto: true });
-    }
-
-    try {
-        const { data: ordine, error: fetchOrdineError } = await supabase
-            .from('ordini_pendenti')
-            .select('*')
-            .eq('id', ordineId)
-            .maybeSingle();
-
-        if (fetchOrdineError || !ordine) {
-            console.error('❌ Ordine pendente non trovato per webhook:', ordineId);
-            return res.status(200).json({ ricevuto: true }); // 200 comunque, per non far ritentare Revolut all'infinito
-        }
-
-        if (ordine.stato === 'completato') {
-            // Webhook duplicato (Revolut può reinviarlo): non riattiviamo due volte.
-            return res.status(200).json({ ricevuto: true });
-        }
-
-        const risultato = await attivaAbbonamentoGenitore({
-            deviceId: ordine.device_id,
-            emailGenitore: ordine.email_genitore,
-            telefonoGenitore: ordine.telefono_genitore,
-            pianoScelto: ordine.piano_scelto,
-        });
-
-        if (!risultato.ok) {
-            console.error('❌ Errore attivazione abbonamento da webhook:', risultato.errore);
-            return res.status(500).json({ error: 'Errore interno' });
-        }
-
-        await supabase
-            .from('ordini_pendenti')
-            .update({ stato: 'completato', dashboard_token: risultato.dashboardToken })
-            .eq('id', ordineId);
-
-        console.log(`✅ Abbonamento attivato via Revolut per device ${ordine.device_id}`);
-        res.status(200).json({ ricevuto: true });
-
-    } catch (error) {
-        console.error('❌ Errore webhook Revolut:', error);
-        res.status(500).json({ error: 'Errore interno' });
-    }
-});
-
-// ============================================================
-//  NUOVA API: STATO ORDINE (la landing page fa polling dopo il redirect
-//  di ritorno da Revolut, per mostrare "pagamento confermato" e il link
-//  alla dashboard non appena il webhook ha fatto il suo lavoro)
-// ============================================================
-app.get('/api/stato-ordine/:ordineId', async (req, res) => {
-    const { ordineId } = req.params;
-
-    const { data: ordine, error } = await supabase
-        .from('ordini_pendenti')
-        .select('stato, dashboard_token')
-        .eq('id', ordineId)
-        .maybeSingle();
-
-    if (error || !ordine) {
-        return res.status(404).json({ error: 'Ordine non trovato' });
-    }
-
-    res.json({
-        stato: ordine.stato,
-        dashboardToken: ordine.stato === 'completato' ? ordine.dashboard_token : null,
-    });
-});
 
 // ============================================================
 //  NUOVA API: STATO SBLOCCO (l'app sul telefono dello studente fa
 //  polling su questo endpoint mentre è ferma sulla schermata di blocco,
 //  per sbloccarsi da sola non appena il genitore ha pagato)
 // ============================================================
+// ============================================================
+//  NUOVA API: VERIFICA ACQUISTO GOOGLE PLAY
+//  Chiamata dall'app subito dopo che lo studente/genitore completa un
+//  abbonamento tramite Google Play Billing. Verifica presso Google che
+//  l'acquisto sia reale prima di sbloccare qualsiasi funzione.
+// ============================================================
+app.post('/api/verifica-acquisto-google', async (req, res) => {
+    const { deviceId, productId, purchaseToken } = req.body;
+
+    if (!deviceId || typeof deviceId !== 'string') {
+        return res.status(400).json({ error: 'deviceId mancante o non valido' });
+    }
+    if (!productId || !purchaseToken) {
+        return res.status(400).json({ error: 'Dati di acquisto mancanti' });
+    }
+
+    const pianoValido = PIANO_PER_PRODOTTO_GOOGLE[productId];
+    if (!pianoValido) {
+        return res.status(400).json({ error: 'Prodotto non riconosciuto' });
+    }
+
+    try {
+        const risultato = await verificaAcquistoGoogle(productId, purchaseToken);
+        if (!risultato.ok) {
+            return res.status(402).json({ error: risultato.motivo || 'Acquisto non valido' });
+        }
+
+        const scadenza = risultato.scadenza || (() => {
+            const d = new Date();
+            d.setMonth(d.getMonth() + 1);
+            return d;
+        })();
+
+        const { error } = await supabase
+            .from('users')
+            .upsert({
+                device_id: deviceId,
+                tipo_abbonamento: pianoValido,
+                scadenza_abbonamento: scadenza.toISOString(),
+            }, { onConflict: 'device_id' });
+
+        if (error) {
+            console.error('❌ Errore salvataggio abbonamento Google:', error);
+            return res.status(500).json({ error: 'Errore interno' });
+        }
+
+        console.log(`✅ Abbonamento ${pianoValido} attivato via Google Play per device ${deviceId}`);
+
+        res.json({ status: 'OK', piano: pianoValido, scadenza: scadenza.toISOString() });
+    } catch (error) {
+        console.error('❌ Errore verifica-acquisto-google:', error);
+        res.status(500).json({ error: 'Errore interno' });
+    }
+});
+
 app.get('/api/stato-sblocco', async (req, res) => {
     const { deviceId } = req.query;
 
@@ -1110,7 +1053,7 @@ app.post('/api/dashboard-genitore', async (req, res) => {
     try {
         const { data: collegamento, error: fetchError } = await supabase
             .from('genitori')
-            .select('device_id_figlio, piano_attivo, dashboard_token')
+            .select('device_id_figlio, dashboard_token')
             .eq('email_genitore', emailGenitore)
             .maybeSingle();
 
@@ -1157,7 +1100,7 @@ app.post('/api/dashboard-genitore', async (req, res) => {
             console.error('❌ Errore lettura utente per dashboard:', utenteError);
         }
 
-        const pianoAttuale = collegamento.piano_attivo || utente?.tipo_abbonamento || 'free';
+        const pianoAttuale = utente?.tipo_abbonamento || 'free';
         const messaggiUtente = (stats || []).filter(m => m.role === 'user');
 
         // Stima ore di studio: ogni scambio (domanda + risposta) vale
