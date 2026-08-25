@@ -782,6 +782,20 @@ app.post('/api/registra-fingerprint', async (req, res) => {
             });
         }
 
+        // L'utente potrebbe non esistere ancora in questo momento (viene
+        // creato di solito solo al primo vero messaggio in chat) — ma la
+        // tabella fingerprints ha un vincolo di chiave esterna verso
+        // users.device_id, quindi dobbiamo assicurarci che la riga utente
+        // esista PRIMA di poter salvare il fingerprint.
+        const { error: upsertUtenteError } = await supabase
+            .from('users')
+            .upsert({ device_id: deviceId }, { onConflict: 'device_id', ignoreDuplicates: true });
+
+        if (upsertUtenteError) {
+            console.error('❌ Errore creazione utente per fingerprint:', upsertUtenteError);
+            return res.status(500).json({ error: 'Errore interno' });
+        }
+
         const { error: upsertError } = await supabase
             .from('fingerprints')
             .upsert({
@@ -1515,4 +1529,3 @@ app.listen(PORT, () => {
     console.log(`👨‍👩‍👧 Codice accoppiamento: scade dopo ${CODICE_ACCOPPIAMENTO_SCADENZA_MINUTI} minuti`);
     console.log(`🌐 Trust proxy: attivo (necessario per rilevare l'IP reale dietro Scaleway)`);
 });
-
