@@ -41,13 +41,11 @@ const OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini';
 
 // NUOVO: configurazione Revolut Business (pagamenti genitori)
-// Vanno configurate su .env quando l'account Revolut Business è pronto:
 // NUOVO: configurazione Google Play Billing (verifica acquisti/abbonamenti)
-// GOOGLE_PACKAGE_NAME: il nome del pacchetto Android (es. com.smartproject.auramentor),
+// GOOGLE_PACKAGE_NAME: il nome del pacchetto Android (es. net.iasmartproject.auramentor),
 // lo trovi in android/app/build.gradle.kts alla voce applicationId.
 // GOOGLE_SERVICE_ACCOUNT_JSON: il contenuto INTERO del file JSON della chiave di
-// servizio Google Cloud (Setup → API access su Play Console), incollato come
-// stringa su una riga sola nel .env.
+// servizio Google Cloud, incollato come stringa su una riga sola nel .env.
 const GOOGLE_PACKAGE_NAME = process.env.GOOGLE_PACKAGE_NAME || '';
 const GOOGLE_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '';
 
@@ -74,6 +72,7 @@ function ottieniClienteGooglePlay() {
         console.error('❌ GOOGLE_SERVICE_ACCOUNT_JSON non valido:', error.message);
         return null;
     }
+
 }
 
 // Verifica un acquisto/abbonamento presso Google Play. Ritorna se è valido
@@ -363,9 +362,18 @@ Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, m
 // ============================================================
 //  NUOVA FUNZIONE: CHIAMATA OPENAI PER LETTURA FOTO (VISION)
 // ============================================================
-async function chiamataOpenAIVisione(imageBase64, mimeType) {
+async function chiamataOpenAIVisione(imageBase64, mimeType, modalita) {
     try {
         console.log('📤 Chiamata a OpenAI (foto->testo)...');
+
+        // Il prompt cambia leggermente a seconda del contesto: "Scanner dei
+        // brutti voti" guarda una verifica GIÀ corretta dal prof (serve
+        // leggere anche segni rossi, crocette, cerchiature, voto scritto a
+        // mano) — mentre "Correggi compito" guarda un esercizio ancora da
+        // correggere (serve solo il lavoro dello studente).
+        const istruzioniSpecifiche = modalita === 'scanner_brutti_voti'
+            ? 'Questa è una verifica GIÀ corretta da un insegnante. Oltre al testo stampato/scritto, presta particolare attenzione a: segni di correzione a penna (rossa o altro colore), crocette (X) su risposte sbagliate, cerchiature, segni di spunta, frasi o correzioni scritte a mano dall\'insegnante, e il voto finale se presente. Riporta chiaramente quali risposte sono segnate come sbagliate e quali correzioni ha scritto l\'insegnante, non solo il testo originale stampato.'
+            : 'Trascrivi anche eventuali annotazioni a mano (crocette, cerchiature, correzioni), non solo il testo stampato.';
 
         const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
             method: 'POST',
@@ -378,12 +386,12 @@ async function chiamataOpenAIVisione(imageBase64, mimeType) {
                 messages: [
                     {
                         role: 'system',
-                        content: 'Trascrivi fedelmente il testo visibile nell\'immagine (es. esercizio, domanda, appunti). Se non c\'è testo ma un problema visivo (es. un grafico, una figura geometrica), descrivi brevemente cosa serve per rispondere. Rispondi in italiano, solo con il contenuto utile, senza commenti aggiuntivi.'
+                        content: `Trascrivi fedelmente TUTTO il contenuto visibile nell'immagine (es. esercizio, domanda, appunti): sia il testo stampato o scritto originariamente, sia qualsiasi annotazione aggiunta sopra. ${istruzioniSpecifiche} Se non c'è testo ma un problema visivo (es. un grafico, una figura geometrica), descrivi brevemente cosa serve per rispondere. Rispondi in italiano, solo con il contenuto utile, senza commenti aggiuntivi.`
                     },
                     {
                         role: 'user',
                         content: [
-                            { type: 'text', text: 'Estrai il testo o descrivi il problema in questa immagine:' },
+                            { type: 'text', text: 'Estrai il testo (incluse eventuali correzioni/annotazioni a mano) o descrivi il problema in questa immagine:' },
                             { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } }
                         ]
                     }
@@ -565,7 +573,7 @@ async function autorizzaEConsumaMessaggio(deviceId, fingerprintHash, req, option
                 ok: false,
                 statusCode: 403,
                 body: {
-                    status: 'BLOCCATO',
+                    status: 'PROVA_ESAURITA',
                     messaggio: `Hai esaurito i ${LIMITE_MESSAGGI_GRATIS} messaggi gratuiti! Mostra questa schermata ai tuoi genitori.`,
                     messaggiRimanenti: 0
                 }
@@ -587,7 +595,7 @@ async function autorizzaEConsumaMessaggio(deviceId, fingerprintHash, req, option
                 ok: false,
                 statusCode: 403,
                 body: {
-                    status: 'BLOCCATO',
+                    status: 'PROVA_ESAURITA',
                     messaggio: `Hai esaurito i ${LIMITE_MESSAGGI_GRATIS} messaggi gratuiti!`,
                     messaggiRimanenti: 0
                 }
@@ -1018,7 +1026,7 @@ app.get('/api/stato-sblocco', async (req, res) => {
 
     const { data: utente, error } = await supabase
         .from('users')
-        .select('tipo_abbonamento, scadenza_abbonamento, is_vip')
+        .select('tipo_abbonamento, scadenza_abbonamento, is_vip, messaggi_gratis_inviati')
         .eq('device_id', deviceId)
         .maybeSingle();
 
@@ -1032,7 +1040,15 @@ app.get('/api/stato-sblocco', async (req, res) => {
         && new Date(utente.scadenza_abbonamento) > new Date()
     );
 
-    res.json({ sbloccato, tipoAbbonamento: utente.tipo_abbonamento });
+    // Messaggi gratuiti rimanenti: rilevante solo per chi è ancora sul
+    // piano free, così l'app sa subito (senza dover provare a mandare un
+    // messaggio) se mostrare la chat normale o la schermata di abbonamento,
+    // anche subito dopo aver riaperto l'app.
+    const messaggiGratisRimanenti = utente.tipo_abbonamento === 'free'
+        ? Math.max(0, LIMITE_MESSAGGI_GRATIS - (utente.messaggi_gratis_inviati || 0))
+        : null;
+
+    res.json({ sbloccato, tipoAbbonamento: utente.tipo_abbonamento, messaggiGratisRimanenti });
 });
 
 // ============================================================
@@ -1187,7 +1203,7 @@ app.post('/api/foto-to-text', async (req, res) => {
             return res.status(autorizzazione.statusCode).json(autorizzazione.body);
         }
 
-        const risultato = await chiamataOpenAIVisione(imageBase64, tipoImmagine);
+        const risultato = await chiamataOpenAIVisione(imageBase64, tipoImmagine, modalita);
 
         if (!risultato.ok) {
             return res.status(502).json({ error: risultato.testo });
