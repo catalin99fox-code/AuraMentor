@@ -84,15 +84,25 @@ async function verificaAcquistoGoogle(productId, purchaseToken) {
         return { ok: false, motivo: 'Verifica Google Play non configurata sul server.' };
     }
     try {
-        const risposta = await client.purchases.subscriptions.get({
+        // subscriptions.get (v1) è deprecato da Google: usiamo subscriptionsv2,
+        // che ha una struttura diversa (subscriptionState invece di
+        // paymentState, expiryTime come testo invece di expiryTimeMillis).
+        const risposta = await client.purchases.subscriptionsv2.get({
             packageName: GOOGLE_PACKAGE_NAME,
-            subscriptionId: productId,
             token: purchaseToken,
         });
         const dati = risposta.data;
-        // paymentState: 1 = pagamento ricevuto, 2 = prova gratuita attiva
-        const valido = dati.paymentState === 1 || dati.paymentState === 2;
-        const scadenza = dati.expiryTimeMillis ? new Date(parseInt(dati.expiryTimeMillis, 10)) : null;
+
+        // Stati che consideriamo "abbonamento attivo": normale attivo, o in
+        // periodo di tolleranza dopo un pagamento fallito (l'utente non deve
+        // perdere l'accesso subito, vedi il periodo di tolleranza scelto su
+        // Play Console).
+        const statiValidi = ['SUBSCRIPTION_STATE_ACTIVE', 'SUBSCRIPTION_STATE_IN_GRACE_PERIOD'];
+        const valido = statiValidi.includes(dati.subscriptionState);
+
+        const primoElemento = (dati.lineItems && dati.lineItems[0]) || {};
+        const scadenza = primoElemento.expiryTime ? new Date(primoElemento.expiryTime) : null;
+
         return { ok: valido, scadenza };
     } catch (error) {
         console.error('❌ Errore verifica Google Play:', error.message);
