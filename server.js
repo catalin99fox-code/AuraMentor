@@ -142,6 +142,9 @@ const CODICE_ACCOPPIAMENTO_SCADENZA_MINUTI = 30;
 const MAX_LEN_IMMAGINE_BASE64 = 7 * 1024 * 1024;
 // Quanti scambi (coppie domanda/risposta) di memoria si mandano all'AI
 const MEMORIA_NUMERO_MESSAGGI = 6;
+// Quanti messaggi mostrare quando si riapre l'app (più ampio della memoria
+// usata per il contesto dell'IA, che invece resta volutamente breve).
+const STORICO_CHAT_LIMITE_MESSAGGI = 40;
 
 // ============================================================
 //  SICUREZZA STUDENTI: RILEVAMENTO SEGNALI DI RISCHIO
@@ -1017,6 +1020,57 @@ app.post('/api/verifica-acquisto-google', async (req, res) => {
     }
 });
 
+// ============================================================
+//  NUOVA API: STORICO CHAT (per ripopolare la conversazione quando si
+//  riapre l'app, invece di ripartire sempre da una chat vuota)
+// ============================================================
+app.get('/api/storico-chat', async (req, res) => {
+    const { deviceId, modalita } = req.query;
+
+    if (!deviceId || typeof deviceId !== 'string') {
+        return res.status(400).json({ error: 'deviceId mancante o non valido' });
+    }
+
+    try {
+        let query = supabase
+            .from('chat_messages')
+            .select('role, content, tipo, created_at')
+            .eq('device_id', deviceId)
+            .in('role', ['user', 'assistant'])
+            .order('created_at', { ascending: false })
+            .limit(STORICO_CHAT_LIMITE_MESSAGGI);
+
+        // Se una modalità è specificata, mostriamo solo la conversazione di
+        // quella modalità (ha più senso: passando da "Interrogami" a
+        // "Aiuto compiti" non ha senso rivedere le vecchie interrogazioni).
+        if (modalita && typeof modalita === 'string') {
+            query = query.eq('modalita', modalita);
+        }
+
+        const { data, error } = await query;
+
+        if (error) {
+            console.error('❌ Errore lettura storico chat:', error);
+            return res.status(500).json({ error: 'Errore interno' });
+        }
+
+        // Le foto non vengono mai salvate (solo il segnaposto "[foto]"),
+        // quindi le togliamo dallo storico mostrato: non c'è nulla di
+        // significativo da ripopolare per quei messaggi.
+        const messaggi = (data || [])
+            .filter(m => m.tipo !== 'foto')
+            .reverse()
+            .map(m => ({ role: m.role, content: m.content }));
+
+        console.log(`📜 Storico chat richiesto: device=${deviceId}, modalita=${modalita || 'tutte'} → ${messaggi.length} messaggi trovati`);
+
+        res.json({ messaggi });
+    } catch (error) {
+        console.error('❌ Errore storico-chat:', error);
+        res.status(500).json({ error: 'Errore interno' });
+    }
+});
+
 app.get('/api/stato-sblocco', async (req, res) => {
     const { deviceId } = req.query;
 
@@ -1461,3 +1515,4 @@ app.listen(PORT, () => {
     console.log(`👨‍👩‍👧 Codice accoppiamento: scade dopo ${CODICE_ACCOPPIAMENTO_SCADENZA_MINUTI} minuti`);
     console.log(`🌐 Trust proxy: attivo (necessario per rilevare l'IP reale dietro Scaleway)`);
 });
+
