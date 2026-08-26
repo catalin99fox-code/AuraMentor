@@ -388,6 +388,14 @@ async function chiamataOpenAIVisione(imageBase64, mimeType, modalita) {
             ? 'Questa è una verifica GIÀ corretta da un insegnante. Oltre al testo stampato/scritto, presta particolare attenzione a: segni di correzione a penna (rossa o altro colore), crocette (X) su risposte sbagliate, cerchiature, segni di spunta, frasi o correzioni scritte a mano dall\'insegnante, e il voto finale se presente. Riporta chiaramente quali risposte sono segnate come sbagliate e quali correzioni ha scritto l\'insegnante, non solo il testo originale stampato.'
             : 'Trascrivi anche eventuali annotazioni a mano (crocette, cerchiature, correzioni), non solo il testo stampato.';
 
+        // Istruzioni specifiche per la notazione matematica: senza queste,
+        // il modello tende a "interpretare male" frazioni, esponenti,
+        // radici o segni meno/moltiplicazione, producendo un testo che
+        // sembra plausibile ma è sbagliato rispetto a quello vero scritto
+        // sul foglio — un problema diverso (e più subdolo) del semplice
+        // "non riesce a leggere".
+        const istruzioniMatematica = 'Se nell\'immagine ci sono espressioni matematiche, equazioni o numeri con frazioni/esponenti/radici, trascrivile con MASSIMA precisione simbolo per simbolo, usando questa notazione testuale semplice: frazioni come "a/b" (es. 3/4), esponenti come "a^b" (es. x^2), radici come "sqrt(a)" o "radice di a", moltiplicazione come "*", divisione come ":" o "/". Non arrotondare, non semplificare e non "correggere" numeri che sembrano strani: riporta ESATTAMENTE le cifre e i simboli come appaiono nella foto, anche se il risultato sembra insolito — potrebbe essere proprio quello il punto dell\'esercizio. In caso di dubbio su una cifra poco leggibile, segnalalo esplicitamente (es. "il numero potrebbe essere 8 o 3, non è chiaro dalla foto") invece di indovinare in silenzio.';
+
         const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
             method: 'POST',
             headers: {
@@ -399,18 +407,18 @@ async function chiamataOpenAIVisione(imageBase64, mimeType, modalita) {
                 messages: [
                     {
                         role: 'system',
-                        content: `Trascrivi fedelmente TUTTO il contenuto visibile nell'immagine (es. esercizio, domanda, appunti): sia il testo stampato o scritto originariamente, sia qualsiasi annotazione aggiunta sopra. ${istruzioniSpecifiche} Se non c'è testo ma un problema visivo (es. un grafico, una figura geometrica), descrivi brevemente cosa serve per rispondere. Rispondi in italiano, solo con il contenuto utile, senza commenti aggiuntivi.`
+                        content: `Trascrivi fedelmente TUTTO il contenuto visibile nell'immagine (es. esercizio, domanda, appunti): sia il testo stampato o scritto originariamente, sia qualsiasi annotazione aggiunta sopra. ${istruzioniSpecifiche} ${istruzioniMatematica} Se non c'è testo ma un problema visivo (es. un grafico, una figura geometrica), descrivi brevemente cosa serve per rispondere. Rispondi in italiano, solo con il contenuto utile, senza commenti aggiuntivi.`
                     },
                     {
                         role: 'user',
                         content: [
-                            { type: 'text', text: 'Estrai il testo (incluse eventuali correzioni/annotazioni a mano) o descrivi il problema in questa immagine:' },
-                            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } }
+                            { type: 'text', text: 'Estrai il testo (incluse eventuali correzioni/annotazioni a mano ed espressioni matematiche esatte) o descrivi il problema in questa immagine:' },
+                            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } }
                         ]
                     }
                 ],
-                max_tokens: 800,
-                temperature: 0.2,
+                max_tokens: 1000,
+                temperature: 0.1,
             }),
         });
 
