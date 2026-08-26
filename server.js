@@ -40,6 +40,13 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini';
 
+// Mathpix: OCR specializzato in matematica/scienze (formule, frazioni,
+// esponenti, notazione chimica). Legge anche testo normale (v3/text),
+// quindi lo usiamo per TUTTE le foto, non solo quelle di matematica —
+// se fallisce o non è configurato, si torna automaticamente a GPT-4o-mini.
+const MATHPIX_APP_ID = process.env.MATHPIX_APP_ID || '';
+const MATHPIX_APP_KEY = process.env.MATHPIX_APP_KEY || '';
+
 // NUOVO: configurazione Revolut Business (pagamenti genitori)
 // NUOVO: configurazione Google Play Billing (verifica acquisti/abbonamenti)
 // GOOGLE_PACKAGE_NAME: il nome del pacchetto Android (es. net.iasmartproject.auramentor),
@@ -373,8 +380,66 @@ Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, m
 }
 
 // ============================================================
-//  NUOVA FUNZIONE: CHIAMATA OPENAI PER LETTURA FOTO (VISION)
+//  LETTURA FOTO: Mathpix (specializzato) con fallback su OpenAI Vision
 // ============================================================
+
+// Mathpix v3/text: legge sia testo normale sia notazione matematica/
+// scientifica (formule, frazioni, esponenti, chimica) con precisione
+// molto più alta di un modello generico su questo tipo di contenuto.
+async function chiamataMathpixOCR(imageBase64, mimeType) {
+    try {
+        console.log('📤 Chiamata a Mathpix (foto->testo)...');
+        const response = await fetch('https://api.mathpix.com/v3/text', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'app_id': MATHPIX_APP_ID,
+                'app_key': MATHPIX_APP_KEY,
+            },
+            body: JSON.stringify({
+                src: `data:${mimeType};base64,${imageBase64}`,
+                formats: ['text'],
+                ocr: ['math', 'text'],
+            }),
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('❌ Errore HTTP Mathpix:', response.status, errorText);
+            return { ok: false, testo: '' };
+        }
+
+        const data = await response.json();
+        const testoLetto = (data.text || '').trim();
+
+        if (testoLetto === '') {
+            console.log('⚠️ Mathpix non ha trovato testo leggibile.');
+            return { ok: false, testo: '' };
+        }
+
+        console.log('✅ Risposta ricevuta da Mathpix!');
+        return { ok: true, testo: testoLetto };
+    } catch (error) {
+        console.error('❌ Errore Mathpix:', error.message);
+        return { ok: false, testo: '' };
+    }
+}
+
+// Funzione "smistatrice": prova prima Mathpix (più preciso, specie per
+// matematica/scienze); se non è configurato o fallisce per qualsiasi
+// motivo, ripiega automaticamente su GPT-4o-mini — così una foto non
+// resta mai bloccata per un problema di un singolo fornitore.
+async function leggiFotoConFallback(imageBase64, mimeType, modalita) {
+    if (MATHPIX_APP_ID && MATHPIX_APP_KEY) {
+        const risultatoMathpix = await chiamataMathpixOCR(imageBase64, mimeType);
+        if (risultatoMathpix.ok) {
+            return { ok: true, testo: risultatoMathpix.testo };
+        }
+        console.log('↩️ Mathpix non disponibile/fallito, ripiego su GPT-4o-mini...');
+    }
+    return chiamataOpenAIVisione(imageBase64, mimeType, modalita);
+}
+
 async function chiamataOpenAIVisione(imageBase64, mimeType, modalita) {
     try {
         console.log('📤 Chiamata a OpenAI (foto->testo)...');
@@ -1462,7 +1527,7 @@ app.post('/api/foto-to-text', async (req, res) => {
             return res.status(autorizzazione.statusCode).json(autorizzazione.body);
         }
 
-        const risultato = await chiamataOpenAIVisione(imageBase64, tipoImmagine, modalita);
+        const risultato = await leggiFotoConFallback(imageBase64, tipoImmagine, modalita);
 
         if (!risultato.ok) {
             return res.status(502).json({ error: risultato.testo });
@@ -1775,6 +1840,7 @@ app.listen(PORT, () => {
     console.log(`🤖 Modello Scaleway: ${SCALEWAY_MODEL} (${SCALEWAY_BASE_URL})`);
     console.log(`🔑 API Key Scaleway: ${SCALEWAY_API_KEY ? '✅ Presente' : '❌ Manca'}`);
     console.log(`🖼️ API Key OpenAI (foto): ${OPENAI_API_KEY ? '✅ Presente' : '❌ Manca'}`);
+    console.log(`🧮 Mathpix (lettura matematica): ${MATHPIX_APP_ID && MATHPIX_APP_KEY ? '✅ Attivo' : '⚠️ Non configurato, uso solo GPT-4o-mini'}`);
     console.log(`🔐 Supabase key: ${process.env.SUPABASE_SERVICE_KEY ? 'service_role ✅' : 'anon/altra (verifica RLS!) ⚠️'}`);
     console.log(`🌍 CORS: ${ALLOWED_ORIGINS.includes('*') ? 'Aperto a tutti (solo sviluppo!)' : ALLOWED_ORIGINS.join(', ')}`);
     console.log(`📦 Cache: ${CACHE_SCADENZA_GIORNI} giorni`);
