@@ -386,6 +386,68 @@ Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, m
 // Mathpix v3/text: legge sia testo normale sia notazione matematica/
 // scientifica (formule, frazioni, esponenti, chimica) con precisione
 // molto più alta di un modello generico su questo tipo di contenuto.
+// Mathpix restituisce (in formats: ['text']) testo "misto": parti normali
+// più formule racchiuse in \( ... \) o \[ ... \] scritte in LaTeX puro
+// (es. "\frac{1}{2}", "x^{2}", "\sqrt{3}"). Questa funzione converte tutto
+// in notazione testuale semplice, la STESSA usata nel prompt del fallback
+// OpenAI Vision (a/b, a^b, sqrt(a), *, :) — così il testo che arriva
+// all'IA (Scaleway) e quello salvato/mostrato all'utente sono sempre
+// coerenti, indipendentemente da quale dei due OCR ha letto la foto.
+function pulisciTestoMathpix(testo) {
+    let t = testo;
+
+    // 1) Rimuove i delimitatori LaTeX inline/display, tenendo solo il contenuto
+    t = t.replace(/\\\(|\\\)/g, '');
+    t = t.replace(/\\\[|\\\]/g, '');
+    t = t.replace(/\$\$?/g, '');
+
+    // 2) \frac{a}{b} -> (a)/(b)  — gestisce anche i \dfrac e \tfrac
+    const risolviFrazioni = (s) => {
+        const regexFrac = /\\[dt]?frac\{([^{}]*)\}\{([^{}]*)\}/;
+        let precedente;
+        do {
+            precedente = s;
+            s = s.replace(regexFrac, '($1)/($2)');
+        } while (s !== precedente && regexFrac.test(s));
+        return s;
+    };
+    t = risolviFrazioni(t);
+
+    // 3) \sqrt{a} -> sqrt(a)   (anche \sqrt[n]{a} -> sqrt[n](a))
+    t = t.replace(/\\sqrt\[([^\]]*)\]\{([^{}]*)\}/g, 'sqrt[$1]($2)');
+    t = t.replace(/\\sqrt\{([^{}]*)\}/g, 'sqrt($1)');
+
+    // 4) Esponenti e pedici: x^{2} -> x^2, a_{1} -> a_1 (tolgo le graffe superflue)
+    t = t.replace(/\^\{([^{}]*)\}/g, '^$1');
+    t = t.replace(/_\{([^{}]*)\}/g, '_$1');
+
+    // 5) Simboli comuni -> notazione testuale
+    t = t
+        .replace(/\\cdot|\\times/g, '*')
+        .replace(/\\div/g, ':')
+        .replace(/\\pm/g, '+/-')
+        .replace(/\\neq/g, '!=')
+        .replace(/\\leq/g, '<=')
+        .replace(/\\geq/g, '>=')
+        .replace(/\\infty/g, 'infinito')
+        .replace(/\\pi/g, 'pi');
+
+    // 6) Toglie i comandi di testo tipo \text{...} -> ...
+    t = t.replace(/\\text\{([^{}]*)\}/g, '$1');
+
+    // 6b) \left( \right) \left[ \right] ecc. -> tiene solo la parentesi
+    t = t.replace(/\\left|\\right/g, '');
+
+    // 7) Pulizia finale: eventuali graffe e backslash residui non gestiti sopra,
+    // e spazi multipli lasciati dalle sostituzioni
+    t = t.replace(/[{}]/g, '');
+    t = t.replace(/\\([a-zA-Z]+)/g, '$1'); // comandi LaTeX non previsti: tiene solo il nome
+    t = t.replace(/[ \t]+/g, ' ');
+    t = t.replace(/ *\n */g, '\n');
+
+    return t.trim();
+}
+
 async function chiamataMathpixOCR(imageBase64, mimeType) {
     try {
         console.log('📤 Chiamata a Mathpix (foto->testo)...');
@@ -410,12 +472,14 @@ async function chiamataMathpixOCR(imageBase64, mimeType) {
         }
 
         const data = await response.json();
-        const testoLetto = (data.text || '').trim();
+        const testoGrezzo = (data.text || '').trim();
 
-        if (testoLetto === '') {
+        if (testoGrezzo === '') {
             console.log('⚠️ Mathpix non ha trovato testo leggibile.');
             return { ok: false, testo: '' };
         }
+
+        const testoLetto = pulisciTestoMathpix(testoGrezzo);
 
         console.log('✅ Risposta ricevuta da Mathpix!');
         return { ok: true, testo: testoLetto };
