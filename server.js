@@ -315,7 +315,9 @@ async function chiamataScaleway(messaggio, modalita, nomeProf, storicoMessaggi) 
 Modalità attiva: ${nomeModalita(modalita)}.
 ${istruzioniModalita}
 
-Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, ma la sostanza viene sempre prima della simpatia: non sacrificare mai completezza o chiarezza per una battuta. Varia il modo in cui apri le risposte (non iniziare sempre allo stesso modo), usa un tono naturale come parlerebbe un tutor giovane e in gamba. Se proprio ci sta un tocco di leggerezza, va bene una frase o un'espressione informale, MAI a scapito del contenuto utile che lo studente deve effettivamente imparare. Rispondi sempre in italiano, con frasi chiare. Usa elenchi puntati e grassetti per i concetti chiave, senza esagerare con la formattazione.`;
+Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, ma la sostanza viene sempre prima della simpatia: non sacrificare mai completezza o chiarezza per una battuta. Varia il modo in cui apri le risposte (non iniziare sempre allo stesso modo), usa un tono naturale come parlerebbe un tutor giovane e in gamba. Se proprio ci sta un tocco di leggerezza, va bene una frase o un'espressione informale, MAI a scapito del contenuto utile che lo studente deve effettivamente imparare. Rispondi sempre in italiano, con frasi chiare. Usa elenchi puntati e grassetti per i concetti chiave, senza esagerare con la formattazione.
+
+Formule ed espressioni matematiche: NON usare MAI la notazione LaTeX (niente \\frac, \\sqrt, \\cdot, \\left \\right, e niente simboli $ o \\( \\) per racchiudere le formule). Scrivi sempre le formule in notazione testuale semplice, leggibile in una normale chat: frazioni come "a/b", esponenti come "a^2", radici come "sqrt(a)", moltiplicazione come "*", divisione come ":".`;
 
         console.log('📤 Chiamata a Scaleway...');
 
@@ -371,7 +373,11 @@ Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, m
         }
 
         console.log('✅ Risposta ricevuta!');
-        return { ok: true, testo: data.choices[0].message.content };
+        // Rete di sicurezza: anche col prompt aggiornato, un LLM può comunque
+        // "ricadere" nell'abitudine di scrivere formule in LaTeX. Ripuliamo
+        // sempre, così l'app non mostra mai \frac{}{} o \( \) allo studente.
+        const testoPulito = pulisciNotazioneMatematica(data.choices[0].message.content);
+        return { ok: true, testo: testoPulito };
 
     } catch (error) {
         console.error('❌ Errore Scaleway:', error.message);
@@ -393,7 +399,7 @@ Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, m
 // OpenAI Vision (a/b, a^b, sqrt(a), *, :) — così il testo che arriva
 // all'IA (Scaleway) e quello salvato/mostrato all'utente sono sempre
 // coerenti, indipendentemente da quale dei due OCR ha letto la foto.
-function pulisciTestoMathpix(testo) {
+function pulisciNotazioneMatematica(testo) {
     let t = testo;
 
     // 1) Rimuove i delimitatori LaTeX inline/display, tenendo solo il contenuto
@@ -479,7 +485,7 @@ async function chiamataMathpixOCR(imageBase64, mimeType) {
             return { ok: false, testo: '' };
         }
 
-        const testoLetto = pulisciTestoMathpix(testoGrezzo);
+        const testoLetto = pulisciNotazioneMatematica(testoGrezzo);
 
         console.log('✅ Risposta ricevuta da Mathpix!');
         return { ok: true, testo: testoLetto };
