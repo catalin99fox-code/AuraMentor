@@ -275,7 +275,7 @@ function validaInput({ messaggioStudente, nomeProf, modalita }) {
 //  ISTRUZIONI PER OGNI MODALITÀ
 // ============================================================
 const ISTRUZIONI_MODALITA = {
-    spiegami_concetto: 'Lo studente ti chiede di spiegare un concetto che non ha capito. Spiegalo in modo semplice e diretto, con un esempio concreto o un\'analogia della vita reale, evitando paroloni inutili.',
+    spiegami_concetto: 'Lo studente ti chiede di spiegare un concetto che non ha capito. Spiegalo in modo semplice e diretto, con un esempio concreto o un\'analogia della vita reale, evitando paroloni inutili. Copri 2-3 aspetti/punti collegati del concetto nella stessa risposta (non fermarti al primo dettaglio isolato): l\'obiettivo è dare una spiegazione che si tenga insieme e sia già utile da sola, non frammentarla in troppi scambi separati.',
     aiuto_compiti: 'Lo studente ha un esercizio da risolvere e vuole essere guidato, non la soluzione bella e pronta. Usa il metodo socratico: fai domande e dai indizi mirati, un passo alla volta, così arriva alla soluzione da solo.',
     interrogami: 'Agisci come un professore che sta interrogando: fai una domanda alla volta sull\'argomento, aspetta la risposta, valutala brevemente, poi passa alla successiva. Dopo alcune domande, dai un voto orientativo (in decimi) e un consiglio su cosa ripassare. Se dai un voto, scrivilo sempre in questo formato esatto in una riga a parte: [VOTO_PREDITTIVO: X.X] seguito da una breve nota (es. "Pronto per la verifica di domani").',
     ripasso: 'Fai un ripasso completo e ben strutturato dell\'argomento portato dallo studente: copri TUTTI i concetti chiave principali dell\'argomento (non fermarti al primo, elencane almeno 4-6 se l\'argomento lo permette), ciascuno spiegato con 2-3 frasi chiare e un esempio pratico dove utile. Organizza il ripasso con elenchi puntati e grassetti sui termini importanti, così è facile da studiare e rileggere. Chiudi con 2-3 domande veloci per verificare che abbia capito. La priorità assoluta è la completezza e l\'utilità per studiare, non la simpatia.',
@@ -1058,7 +1058,7 @@ app.get('/api/storico-chat', async (req, res) => {
     try {
         let query = supabase
             .from('chat_messages')
-            .select('role, content, tipo, created_at')
+            .select('id, role, content, tipo, created_at, preferito')
             .eq('device_id', deviceId)
             .in('role', ['user', 'assistant'])
             .order('created_at', { ascending: false })
@@ -1081,10 +1081,13 @@ app.get('/api/storico-chat', async (req, res) => {
         // Le foto non vengono mai salvate (solo il segnaposto "[foto]"),
         // quindi le togliamo dallo storico mostrato: non c'è nulla di
         // significativo da ripopolare per quei messaggi.
+        // Nota: id e preferito sono campi AGGIUNTIVI rispetto a prima —
+        // un'app meno recente che ignora questi campi continua a
+        // funzionare esattamente come prima (compatibilità mantenuta).
         const messaggi = (data || [])
             .filter(m => m.tipo !== 'foto')
             .reverse()
-            .map(m => ({ role: m.role, content: m.content }));
+            .map(m => ({ id: m.id, role: m.role, content: m.content, preferito: m.preferito || false }));
 
         console.log(`📜 Storico chat richiesto: device=${deviceId}, modalita=${modalita || 'tutte'} → ${messaggi.length} messaggi trovati`);
 
@@ -1094,6 +1097,172 @@ app.get('/api/storico-chat', async (req, res) => {
         res.status(500).json({ error: 'Errore interno' });
     }
 });
+
+// ============================================================
+//  NUOVA API: SEGNA/TOGLI UN MESSAGGIO COME PREFERITO
+// ============================================================
+app.post('/api/messaggio-preferito', async (req, res) => {
+    const { deviceId, messaggioId, preferito } = req.body;
+
+    if (!deviceId || typeof deviceId !== 'string') {
+        return res.status(400).json({ error: 'deviceId mancante o non valido' });
+    }
+    if (!messaggioId) {
+        return res.status(400).json({ error: 'messaggioId mancante' });
+    }
+
+    try {
+        const { error } = await supabase
+            .from('chat_messages')
+            .update({ preferito: preferito === true })
+            .eq('id', messaggioId)
+            .eq('device_id', deviceId); // sicurezza: solo il proprietario del messaggio
+
+        if (error) {
+            console.error('❌ Errore aggiornamento preferito:', error);
+            return res.status(500).json({ error: 'Errore interno' });
+        }
+
+        res.json({ status: 'OK' });
+    } catch (error) {
+        console.error('❌ Errore messaggio-preferito:', error);
+        res.status(500).json({ error: 'Errore interno' });
+    }
+});
+
+// ============================================================
+//  NUOVA API: ELENCO DEI MESSAGGI PREFERITI (risposte salvate)
+// ============================================================
+app.get('/api/preferiti', async (req, res) => {
+    const { deviceId } = req.query;
+
+    if (!deviceId || typeof deviceId !== 'string') {
+        return res.status(400).json({ error: 'deviceId mancante o non valido' });
+    }
+
+    try {
+        const { data, error } = await supabase
+            .from('chat_messages')
+            .select('id, content, modalita, created_at')
+            .eq('device_id', deviceId)
+            .eq('preferito', true)
+            .eq('role', 'assistant')
+            .order('created_at', { ascending: false })
+            .limit(100);
+
+        if (error) {
+            console.error('❌ Errore lettura preferiti:', error);
+            return res.status(500).json({ error: 'Errore interno' });
+        }
+
+        res.json({ preferiti: data || [] });
+    } catch (error) {
+        console.error('❌ Errore preferiti:', error);
+        res.status(500).json({ error: 'Errore interno' });
+    }
+});
+
+// ============================================================
+//  NUOVA API: CERCA NELLA CRONOLOGIA CHAT
+// ============================================================
+app.get('/api/cerca-chat', async (req, res) => {
+    const { deviceId, query: testoRicerca } = req.query;
+
+    if (!deviceId || typeof deviceId !== 'string') {
+        return res.status(400).json({ error: 'deviceId mancante o non valido' });
+    }
+    if (!testoRicerca || typeof testoRicerca !== 'string' || testoRicerca.trim().length < 2) {
+        return res.status(400).json({ error: 'Testo di ricerca troppo corto (minimo 2 caratteri)' });
+    }
+
+    try {
+        const { data, error } = await supabase
+            .from('chat_messages')
+            .select('id, role, content, modalita, created_at')
+            .eq('device_id', deviceId)
+            .in('role', ['user', 'assistant'])
+            .ilike('content', `%${testoRicerca.trim()}%`)
+            .order('created_at', { ascending: false })
+            .limit(30);
+
+        if (error) {
+            console.error('❌ Errore ricerca chat:', error);
+            return res.status(500).json({ error: 'Errore interno' });
+        }
+
+        res.json({ risultati: data || [] });
+    } catch (error) {
+        console.error('❌ Errore cerca-chat:', error);
+        res.status(500).json({ error: 'Errore interno' });
+    }
+});
+
+// ============================================================
+//  NUOVA API: STATISTICHE PERSONALI DELLO STUDENTE
+//  (diverse dalla dashboard genitori: qui è lo studente stesso a
+//  vedere i propri progressi, come motivazione/gamification leggera)
+// ============================================================
+app.get('/api/statistiche-personali', async (req, res) => {
+    const { deviceId } = req.query;
+
+    if (!deviceId || typeof deviceId !== 'string') {
+        return res.status(400).json({ error: 'deviceId mancante o non valido' });
+    }
+
+    try {
+        const { data, error } = await supabase
+            .from('chat_messages')
+            .select('created_at')
+            .eq('device_id', deviceId)
+            .eq('role', 'user')
+            .order('created_at', { ascending: false });
+
+        if (error) {
+            console.error('❌ Errore lettura statistiche:', error);
+            return res.status(500).json({ error: 'Errore interno' });
+        }
+
+        const messaggi = data || [];
+        const totaleMessaggi = messaggi.length;
+
+        // Calcolo dei "giorni di fila" (streak): giorni consecutivi con
+        // almeno un messaggio, contando all'indietro da oggi (o da ieri,
+        // se oggi non ha ancora scritto nulla — non vogliamo azzerare lo
+        // streak solo perché non ha ancora aperto l'app oggi).
+        const giorniConAttivita = new Set(
+            messaggi.map(m => new Date(m.created_at).toISOString().slice(0, 10))
+        );
+
+        let streak = 0;
+        let cursore = new Date();
+        // Se oggi non ha ancora scritto, si parte da ieri per il conteggio,
+        // così lo streak non si azzera a mezzanotte prima che riapra l'app.
+        const oggiStr = cursore.toISOString().slice(0, 10);
+        if (!giorniConAttivita.has(oggiStr)) {
+            cursore.setDate(cursore.getDate() - 1);
+        }
+        while (true) {
+            const giornoStr = cursore.toISOString().slice(0, 10);
+            if (giorniConAttivita.has(giornoStr)) {
+                streak++;
+                cursore.setDate(cursore.getDate() - 1);
+            } else {
+                break;
+            }
+        }
+
+        res.json({
+            totaleMessaggi,
+            giorniAttivi: giorniConAttivita.size,
+            streakGiorni: streak,
+        });
+    } catch (error) {
+        console.error('❌ Errore statistiche-personali:', error);
+        res.status(500).json({ error: 'Errore interno' });
+    }
+});
+
+
 
 app.get('/api/stato-sblocco', async (req, res) => {
     const { deviceId } = req.query;
@@ -1398,23 +1567,26 @@ app.post('/api/chat', async (req, res) => {
             const risultatoIA = await chiamataScaleway(messaggioStudente, modalita, nomeProf, storico);
             const { testoPulito, voto } = estraiVotoPredittivo(risultatoIA.testo);
 
-            const { error: insertStoricoError } = await supabase
+            const { data: righeVip, error: insertStoricoError } = await supabase
                 .from('chat_messages')
                 .insert([
                     { device_id: deviceId, role: 'user', content: messaggioStudente, tipo: 'testo', modalita: modalita || null },
                     { device_id: deviceId, role: 'assistant', content: testoPulito, tipo: 'testo', modalita: modalita || null, voto_predittivo: voto }
-                ]);
+                ])
+                .select('id, role');
 
             if (insertStoricoError) {
                 console.error('⚠️ Errore salvataggio storico VIP:', insertStoricoError);
             }
+            const messaggioIdVip = righeVip?.find(r => r.role === 'assistant')?.id ?? null;
 
             return res.json({
                 status: 'OK',
                 risposta: testoPulito,
                 votoPredittivo: voto,
                 messaggiRimanenti: 'VIP',
-                daCache: false
+                daCache: false,
+                messaggioId: messaggioIdVip
             });
         }
 
@@ -1437,22 +1609,25 @@ app.post('/api/chat', async (req, res) => {
             if (giorniPassati < CACHE_SCADENZA_GIORNI) {
                 console.log('📦 Risposta dalla cache!');
 
-                const { error: insertStoricoCacheError } = await supabase
+                const { data: righeCache, error: insertStoricoCacheError } = await supabase
                     .from('chat_messages')
                     .insert([
                         { device_id: deviceId, role: 'user', content: messaggioStudente, tipo: 'testo', modalita: modalita || null },
                         { device_id: deviceId, role: 'assistant', content: rispostaCache.risposta, tipo: 'testo', modalita: modalita || null }
-                    ]);
+                    ])
+                    .select('id, role');
 
                 if (insertStoricoCacheError) {
                     console.error('⚠️ Errore salvataggio storico cache:', insertStoricoCacheError);
                 }
+                const messaggioIdCache = righeCache?.find(r => r.role === 'assistant')?.id ?? null;
 
                 return res.json({
                     status: 'OK',
                     risposta: rispostaCache.risposta,
                     messaggiRimanenti,
-                    daCache: true
+                    daCache: true,
+                    messaggioId: messaggioIdCache
                 });
             }
         }
@@ -1487,16 +1662,18 @@ app.post('/api/chat', async (req, res) => {
         // ============================================================
         //  SALVA STORICO
         // ============================================================
-        const { error: insertStoricoError } = await supabase
+        const { data: righeStorico, error: insertStoricoError } = await supabase
             .from('chat_messages')
             .insert([
                 { device_id: deviceId, role: 'user', content: messaggioStudente, tipo: 'testo', modalita: modalita || null },
                 { device_id: deviceId, role: 'assistant', content: testoPulito, tipo: 'testo', modalita: modalita || null, voto_predittivo: voto }
-            ]);
+            ])
+            .select('id, role');
 
         if (insertStoricoError) {
             console.error('⚠️ Errore salvataggio storico:', insertStoricoError);
         }
+        const messaggioId = righeStorico?.find(r => r.role === 'assistant')?.id ?? null;
 
         // ============================================================
         //  RISPOSTA
@@ -1515,7 +1692,8 @@ app.post('/api/chat', async (req, res) => {
             votoPredittivo: voto,
             messaggiRimanenti,
             daCache: false,
-            abbonamento: haAbbonamento ? utente.tipo_abbonamento : 'free'
+            abbonamento: haAbbonamento ? utente.tipo_abbonamento : 'free',
+            messaggioId
         });
 
     } catch (error) {
