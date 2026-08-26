@@ -151,7 +151,7 @@ const CODICE_ACCOPPIAMENTO_SCADENZA_MINUTI = 30;
 // NUOVO: limite dimensione immagine in base64 (~5MB di immagine originale)
 const MAX_LEN_IMMAGINE_BASE64 = 7 * 1024 * 1024;
 // Quanti scambi (coppie domanda/risposta) di memoria si mandano all'AI
-const MEMORIA_NUMERO_MESSAGGI = 6;
+const MEMORIA_NUMERO_MESSAGGI = 10;
 // Quanti messaggi mostrare quando si riapre l'app (più ampio della memoria
 // usata per il contesto dell'IA, che invece resta volutamente breve).
 const STORICO_CHAT_LIMITE_MESSAGGI = 40;
@@ -1085,7 +1085,11 @@ app.get('/api/storico-chat', async (req, res) => {
         // un'app meno recente che ignora questi campi continua a
         // funzionare esattamente come prima (compatibilità mantenuta).
         const messaggi = (data || [])
-            .filter(m => m.tipo !== 'foto')
+            // Escludiamo solo il segnaposto vuoto "[foto]" (quello salvato
+            // dall'endpoint di lettura foto, senza contenuto vero), NON i
+            // messaggi con tipo='foto' che hanno il testo reale estratto
+            // (quelli sì hanno un contenuto significativo da mostrare).
+            .filter(m => m.content !== '[foto]')
             .reverse()
             .map(m => ({ id: m.id, role: m.role, content: m.content, preferito: m.preferito || false }));
 
@@ -1485,20 +1489,73 @@ app.post('/api/foto-to-text', async (req, res) => {
 // ============================================================
 //  MEMORIA CONVERSAZIONE: ultimi N messaggi (scambi utente/assistant)
 // ============================================================
-async function recuperaStorico(deviceId) {
-    const { data, error } = await supabase
+// Recupera la memoria della conversazione da dare all'IA come contesto.
+// Prendiamo TRE gruppi, uniti senza doppioni:
+//  1) tutti i messaggi con tipo='foto' in questa modalità — l'esercizio
+//     estratto da una foto non deve MAI scivolare fuori dalla memoria,
+//     anche se la chat va avanti a lungo dopo (è il caso segnalato che ha
+//     fatto scoprire questo problema: "Aiuto compiti" con una foto perdeva
+//     il filo del discorso dopo pochi scambi);
+//  2) il primo scambio della conversazione (l'"ancora" del discorso, anche
+//     quando non è una foto);
+//  3) gli ultimi messaggi recenti, per il contesto immediato.
+// Filtriamo sempre anche per modalità, per non mescolare conversazioni
+// diverse (es. passando da "Interrogami" a "Aiuto compiti").
+async function recuperaStorico(deviceId, modalita) {
+    let queryFoto = supabase
         .from('chat_messages')
-        .select('role, content')
+        .select('id, role, content')
+        .eq('device_id', deviceId)
+        .eq('tipo', 'foto')
+        .in('role', ['user', 'assistant'])
+        .order('created_at', { ascending: true });
+
+    let queryPrimo = supabase
+        .from('chat_messages')
+        .select('id, role, content')
+        .eq('device_id', deviceId)
+        .in('role', ['user', 'assistant'])
+        .order('created_at', { ascending: true })
+        .limit(2);
+
+    let queryRecenti = supabase
+        .from('chat_messages')
+        .select('id, role, content')
         .eq('device_id', deviceId)
         .in('role', ['user', 'assistant'])
         .order('created_at', { ascending: false })
         .limit(MEMORIA_NUMERO_MESSAGGI);
 
-    if (error) {
-        console.error('❌ Errore lettura storico conversazione:', error);
+    if (modalita) {
+        queryFoto = queryFoto.eq('modalita', modalita);
+        queryPrimo = queryPrimo.eq('modalita', modalita);
+        queryRecenti = queryRecenti.eq('modalita', modalita);
+    }
+
+    const [
+        { data: foto, error: errFoto },
+        { data: primi, error: errPrimi },
+        { data: recenti, error: errRecenti },
+    ] = await Promise.all([queryFoto, queryPrimo, queryRecenti]);
+
+    if (errFoto || errPrimi || errRecenti) {
+        console.error('❌ Errore lettura storico conversazione:', errFoto || errPrimi || errRecenti);
         return [];
     }
-    return (data || []).reverse();
+
+    const recentiOrdinati = (recenti || []).reverse();
+    const idsGiaPresenti = new Set(recentiOrdinati.map(m => m.id));
+
+    // Il primo scambio va aggiunto in cima solo se non già incluso tra i
+    // recenti (conversazioni brevi, dove i due gruppi si sovrappongono).
+    const primoAnchor = (primi || []).filter(m => !idsGiaPresenti.has(m.id));
+    primoAnchor.forEach(m => idsGiaPresenti.add(m.id));
+
+    // Le foto vanno aggiunte in ordine cronologico, prima di tutto il
+    // resto, sempre evitando i doppioni.
+    const fotoAnchor = (foto || []).filter(m => !idsGiaPresenti.has(m.id));
+
+    return [...fotoAnchor, ...primoAnchor, ...recentiOrdinati].map(m => ({ role: m.role, content: m.content }));
 }
 
 // Estrae un eventuale voto predittivo scritto dall'AI nel formato
@@ -1513,7 +1570,7 @@ function estraiVotoPredittivo(testoRisposta) {
 }
 
 app.post('/api/chat', async (req, res) => {
-    const { deviceId, messaggioStudente, nomeProf, modalita, fingerprintHash } = req.body;
+    const { deviceId, messaggioStudente, nomeProf, modalita, fingerprintHash, daFoto } = req.body;
 
     if (!deviceId || typeof deviceId !== 'string') {
         return res.status(400).json({ error: 'deviceId mancante o non valido' });
@@ -1537,7 +1594,7 @@ app.post('/api/chat', async (req, res) => {
         // ma il messaggio va comunque registrato per contesto clinico se
         // un adulto dovesse mai rivedere la conversazione).
         await supabase.from('chat_messages').insert([
-            { device_id: deviceId, role: 'user', content: messaggioStudente, tipo: 'testo', modalita: modalita || null },
+            { device_id: deviceId, role: 'user', content: messaggioStudente, tipo: daFoto ? 'foto' : 'testo', modalita: modalita || null },
             { device_id: deviceId, role: 'assistant', content: MESSAGGIO_RISORSE_EMERGENZA, tipo: 'testo', modalita: modalita || null },
         ]);
         return res.json({
@@ -1563,15 +1620,15 @@ app.post('/api/chat', async (req, res) => {
         if (vip) {
             console.log('⭐ Utente VIP! Accesso illimitato.');
 
-            const storico = await recuperaStorico(deviceId);
+            const storico = await recuperaStorico(deviceId, modalita);
             const risultatoIA = await chiamataScaleway(messaggioStudente, modalita, nomeProf, storico);
             const { testoPulito, voto } = estraiVotoPredittivo(risultatoIA.testo);
 
             const { data: righeVip, error: insertStoricoError } = await supabase
                 .from('chat_messages')
                 .insert([
-                    { device_id: deviceId, role: 'user', content: messaggioStudente, tipo: 'testo', modalita: modalita || null },
-                    { device_id: deviceId, role: 'assistant', content: testoPulito, tipo: 'testo', modalita: modalita || null, voto_predittivo: voto }
+                    { device_id: deviceId, role: 'user', content: messaggioStudente, tipo: daFoto ? 'foto' : 'testo', modalita: modalita || null },
+                    { device_id: deviceId, role: 'assistant', content: testoPulito, tipo: daFoto ? 'foto' : 'testo', modalita: modalita || null, voto_predittivo: voto }
                 ])
                 .select('id, role');
 
@@ -1612,7 +1669,7 @@ app.post('/api/chat', async (req, res) => {
                 const { data: righeCache, error: insertStoricoCacheError } = await supabase
                     .from('chat_messages')
                     .insert([
-                        { device_id: deviceId, role: 'user', content: messaggioStudente, tipo: 'testo', modalita: modalita || null },
+                        { device_id: deviceId, role: 'user', content: messaggioStudente, tipo: daFoto ? 'foto' : 'testo', modalita: modalita || null },
                         { device_id: deviceId, role: 'assistant', content: rispostaCache.risposta, tipo: 'testo', modalita: modalita || null }
                     ])
                     .select('id, role');
@@ -1635,7 +1692,7 @@ app.post('/api/chat', async (req, res) => {
         // ============================================================
         //  CHIAMA SCALEWAY (con memoria conversazione)
         // ============================================================
-        const storico = await recuperaStorico(deviceId);
+        const storico = await recuperaStorico(deviceId, modalita);
         const risultatoIA = await chiamataScaleway(messaggioStudente, modalita, nomeProf, storico);
         const { testoPulito, voto } = risultatoIA.ok
             ? estraiVotoPredittivo(risultatoIA.testo)
@@ -1665,8 +1722,8 @@ app.post('/api/chat', async (req, res) => {
         const { data: righeStorico, error: insertStoricoError } = await supabase
             .from('chat_messages')
             .insert([
-                { device_id: deviceId, role: 'user', content: messaggioStudente, tipo: 'testo', modalita: modalita || null },
-                { device_id: deviceId, role: 'assistant', content: testoPulito, tipo: 'testo', modalita: modalita || null, voto_predittivo: voto }
+                { device_id: deviceId, role: 'user', content: messaggioStudente, tipo: daFoto ? 'foto' : 'testo', modalita: modalita || null },
+                { device_id: deviceId, role: 'assistant', content: testoPulito, tipo: daFoto ? 'foto' : 'testo', modalita: modalita || null, voto_predittivo: voto }
             ])
             .select('id, role');
 
