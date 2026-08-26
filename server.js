@@ -444,6 +444,31 @@ function pulisciNotazioneMatematica(testo) {
     // 6b) \left( \right) \left[ \right] ecc. -> tiene solo la parentesi
     t = t.replace(/\\left|\\right/g, '');
 
+    // 6c) Altri simboli comuni non coperti al punto 5
+    t = t
+        .replace(/\\in/g, '∈')
+        .replace(/\\notin/g, '∉')
+        .replace(/\\Rightarrow|\\implies/g, '=>')
+        .replace(/\\rightarrow|\\to/g, '->')
+        .replace(/\\ldots|\\cdots|\\dots/g, '...');
+
+    // 6d) Comandi con UN argomento tra graffe che si limitano a "decorare"
+    // il contenuto senza cambiarne il significato — es. \boxed{-1} -> -1,
+    // \mathbb{N} -> N, \mathbf{x} -> x, \overline{AB} -> AB. Copre in un
+    // colpo solo tutti i comandi di questo tipo, anche quelli non previsti
+    // esplicitamente sopra. Ripetuto finché non restano più comandi così,
+    // per gestire eventuali annidamenti (es. \boxed{\mathbb{N}}).
+    const risolviComandiDecorativi = (s) => {
+        const regexDecor = /\\[a-zA-Z]+\{([^{}]*)\}/;
+        let precedente;
+        do {
+            precedente = s;
+            s = s.replace(regexDecor, '$1');
+        } while (s !== precedente && regexDecor.test(s));
+        return s;
+    };
+    t = risolviComandiDecorativi(t);
+
     // 7) Pulizia finale: eventuali graffe e backslash residui non gestiti sopra,
     // e spazi multipli lasciati dalle sostituzioni
     t = t.replace(/[{}]/g, '');
