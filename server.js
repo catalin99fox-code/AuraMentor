@@ -334,27 +334,27 @@ Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, m
 
         messages.push({ role: 'user', content: messaggio });
 
-        // DeepSeek V4 Flash ha di default il "pensiero" interno (thinking)
-        // ATTIVO — consuma token dallo stesso budget della risposta finale,
-        // e su problemi confusi può "pensare" così tanto da esaurire tutti
-        // i token disponibili senza mai arrivare a scrivere una risposta
-        // (esattamente il bug che abbiamo appena risolto). Per un tutor
-        // scolastico conversazionale, risposte dirette sono più utili di un
-        // ragionamento nascosto che lo studente non vede comunque — quindi
-        // lo disattiviamo del tutto: risposte più veloci, più economiche, e
-        // niente più rischio di "risposta vuota per token finiti".
+        // DeepSeek V4 Flash usa il "pensiero" interno (thinking) per
+        // ragionare prima di rispondere — utile davvero per problemi
+        // complessi (matematica, geometria), dove aiuta a controllare il
+        // ragionamento prima di scrivere la risposta finale. Il bug di
+        // prima (risposta vuota su problemi molto confusi) non veniva dal
+        // ragionamento in sé, ma da un margine di token troppo stretto:
+        // ragionamento e risposta finale condividono lo stesso budget, e
+        // 2500 non bastavano per entrambi sui casi più complicati. La
+        // soluzione giusta è dare più margine (sotto), non disattivare il
+        // ragionamento — che resta un vantaggio reale per la qualità delle
+        // risposte, non un costo da tagliare.
         const corpoRichiesta = {
             model: SCALEWAY_MODEL,
             messages,
-            max_tokens: 2000,
+            max_tokens: 6000,
             temperature: 0.85,
-            thinking: { type: 'disabled' },
         };
-        // Se in futuro servisse riattivare il ragionamento per certi casi
-        // (es. problemi molto complessi), basta impostare questa variabile
-        // d'ambiente — altrimenti resta disattivato di default (vedi sopra).
+        // reasoning_effort: regola QUANTO ragiona (non se ragiona) — "low"
+        // di default per restare veloce/economico su domande normali; si
+        // può alzare da .env se serve più precisione su casi difficili.
         if (SCALEWAY_REASONING_EFFORT) {
-            corpoRichiesta.thinking = { type: 'enabled' };
             corpoRichiesta.reasoning_effort = SCALEWAY_REASONING_EFFORT;
         }
 
