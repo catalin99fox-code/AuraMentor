@@ -135,7 +135,21 @@ const LIMITE_MESSAGGI_GRATIS = 10; // prova gratuita: tutto sbloccato, incluse l
 const LIMITE_BASE_TESTO_SETTIMANALE = 105; // 15/giorno equivalente, ma usabile liberamente nella settimana
 const LIMITE_PRO_TESTO_SETTIMANALE = 245; // 35/giorno equivalente
 const LIMITE_PRO_FOTO_SETTIMANALE = 105; // 15/giorno equivalente; il Base non ha accesso alle foto
-const LIMITE_ASSOLUTO_GIORNALIERO = 50; // tetto di sicurezza "fair usage" ANTI-ABUSO, resta per giorno singolo
+// Limite GIORNALIERO per piano (oltre a quello settimanale sopra): evita che
+// tutta la quota settimanale venga bruciata in un solo giorno. Impostato a
+// circa il doppio della media giornaliera implicita nel limite settimanale,
+// così lo studente ha comunque libertà di usarlo di più in certi giorni
+// (es. sotto esame) senza però poter consumare l'intera settimana in un colpo.
+const LIMITE_BASE_TESTO_GIORNALIERO = 30;
+const LIMITE_PRO_TESTO_GIORNALIERO = 70;
+const LIMITE_PRO_FOTO_GIORNALIERO = 30;
+// Tetto di sicurezza "fair usage" ANTI-ABUSO, combinato testo+foto: deve
+// restare più alto della somma dei limiti giornalieri per piano qui sopra
+// (70 testo Pro + 30 foto Pro = 100), altrimenti scatterebbe sempre prima
+// lui rendendo inutili quei limiti. Serve solo a fermare abusi estremi
+// (es. bot/script), non a regolare l'uso normale — quello lo fanno i
+// limiti per piano sopra.
+const LIMITE_ASSOLUTO_GIORNALIERO = 120;
 const MAX_LEN_MESSAGGIO = 4000;
 const MAX_LEN_NOME_PROF = 30;
 
@@ -153,12 +167,27 @@ const MODALITA_INFO = {
 const MODALITA_VALIDE = Object.keys(MODALITA_INFO);
 const MODALITA_SOLO_PRO = MODALITA_VALIDE.filter(m => MODALITA_INFO[m].soloPro);
 
+// Modalità in cui la risposta dipende fortemente dallo storico della
+// conversazione (non solo dall'ultimo messaggio): la cache è basata solo su
+// modalità+testo del messaggio, quindi qui va disattivata — altrimenti una
+// risposta breve e comune ("sì", "non lo so", "grazie") rischia di arrivare
+// da una conversazione precedente completamente diversa e senza senso nel
+// contesto attuale.
+const MODALITA_SENZA_CACHE = ['interrogami', 'aiuto_compiti'];
+
 const CACHE_SCADENZA_GIORNI = 30;
 const CODICE_ACCOPPIAMENTO_SCADENZA_MINUTI = 30;
 // NUOVO: limite dimensione immagine in base64 (~5MB di immagine originale)
 const MAX_LEN_IMMAGINE_BASE64 = 7 * 1024 * 1024;
 // Quanti scambi (coppie domanda/risposta) di memoria si mandano all'AI
 const MEMORIA_NUMERO_MESSAGGI = 10;
+// Tetto alle foto PASSATE incluse come "ancora" in memoria (vedi
+// recuperaStorico sotto): senza questo, ogni foto mai letta in una
+// modalità veniva rimandata all'AI ad ogni messaggio successivo, per
+// sempre — un costo che cresce senza limite con l'uso dell'app nel tempo,
+// oltre al rischio di superare la finestra di contesto del modello su
+// conversazioni molto vecchie e piene di foto.
+const MEMORIA_MAX_FOTO_STORICHE = 6;
 // Quanti messaggi mostrare quando si riapre l'app (più ampio della memoria
 // usata per il contesto dell'IA, che invece resta volutamente breve).
 const STORICO_CHAT_LIMITE_MESSAGGI = 40;
@@ -283,7 +312,7 @@ function validaInput({ messaggioStudente, nomeProf, modalita }) {
 // ============================================================
 const ISTRUZIONI_MODALITA = {
     spiegami_concetto: 'Lo studente ti chiede di spiegare un concetto che non ha capito. Spiegalo in modo semplice e diretto, con un esempio concreto o un\'analogia della vita reale, evitando paroloni inutili. Copri 2-3 aspetti/punti collegati del concetto nella stessa risposta (non fermarti al primo dettaglio isolato): l\'obiettivo è dare una spiegazione che si tenga insieme e sia già utile da sola, non frammentarla in troppi scambi separati.',
-    aiuto_compiti: 'Lo studente ha un esercizio da risolvere e vuole essere guidato, non la soluzione bella e pronta. Usa il metodo socratico: fai domande e dai indizi mirati, un passo alla volta, così arriva alla soluzione da solo.tranne che per la matematica e geografia',
+    aiuto_compiti: 'Lo studente ha un esercizio da risolvere e vuole essere guidato, non la soluzione bella e pronta. Usa il metodo socratico: fai domande e dai indizi mirati, un passo alla volta, così arriva alla soluzione da solo.',
     interrogami: 'Agisci come un professore che sta interrogando: fai una domanda alla volta sull\'argomento, aspetta la risposta, valutala brevemente, poi passa alla successiva. Dopo alcune domande, dai un voto orientativo (in decimi) e un consiglio su cosa ripassare. Se dai un voto, scrivilo sempre in questo formato esatto in una riga a parte: [VOTO_PREDITTIVO: X.X] seguito da una breve nota (es. "Pronto per la verifica di domani").',
     ripasso: 'Fai un ripasso completo e ben strutturato dell\'argomento portato dallo studente: copri TUTTI i concetti chiave principali dell\'argomento (non fermarti al primo, elencane almeno 4-6 se l\'argomento lo permette), ciascuno spiegato con 2-3 frasi chiare e un esempio pratico dove utile. Organizza il ripasso con elenchi puntati e grassetti sui termini importanti, così è facile da studiare e rileggere. Chiudi con 2-3 domande veloci per verificare che abbia capito. La priorità assoluta è la completezza e l\'utilità per studiare, non la simpatia.',
     correggi_compito: 'Lo studente ti mostra un compito o un esercizio già svolto (anche fotografato). Correggilo: dì chiaramente cosa è giusto, cosa è sbagliato e perché, e mostra come si risolve correttamente il punto sbagliato.',
@@ -315,7 +344,9 @@ async function chiamataScaleway(messaggio, modalita, nomeProf, storicoMessaggi) 
 Modalità attiva: ${nomeModalita(modalita)}.
 ${istruzioniModalita}
 
-Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, ma la sostanza viene sempre prima della simpatia: non sacrificare mai completezza o chiarezza per una battuta. Varia il modo in cui apri le risposte (non iniziare sempre allo stesso modo), usa un tono naturale come parlerebbe un tutor giovane e in gamba. Se proprio ci sta un tocco di leggerezza, va bene una frase o un'espressione informale, MAI a scapito del contenuto utile che lo studente deve effettivamente imparare. Rispondi sempre in italiano, con frasi chiare. Usa elenchi puntati e grassetti per i concetti chiave, senza esagerare con la formattazione.`;
+Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, ma la sostanza viene sempre prima della simpatia: non sacrificare mai completezza o chiarezza per una battuta. Varia il modo in cui apri le risposte (non iniziare sempre allo stesso modo), usa un tono naturale come parlerebbe un tutor giovane e in gamba. Se proprio ci sta un tocco di leggerezza, va bene una frase o un'espressione informale, MAI a scapito del contenuto utile che lo studente deve effettivamente imparare. Rispondi sempre in italiano, con frasi chiare. Usa elenchi puntati e grassetti per i concetti chiave, senza esagerare con la formattazione.
+
+Formule ed espressioni matematiche: NON usare MAI la notazione LaTeX (niente \\frac, \\sqrt, \\boxed, \\cdot, \\left \\right, e niente simboli $ o \\( \\) per racchiudere le formule). Scrivi sempre le formule in notazione testuale semplice, leggibile in una normale chat: frazioni come "a/b", esponenti come "a^2", radici come "sqrt(a)", moltiplicazione come "*", divisione come ":".`;
 
         console.log('📤 Chiamata a Scaleway...');
 
@@ -393,7 +424,11 @@ Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, m
         }
 
         console.log('✅ Risposta ricevuta!');
-        return { ok: true, testo: data.choices[0].message.content };
+        // Rete di sicurezza: anche col prompt aggiornato, un LLM può comunque
+        // "ricadere" nell'abitudine di scrivere formule in LaTeX. Ripuliamo
+        // sempre, così l'app non mostra mai \frac{}{} o \boxed{} allo studente.
+        const testoPulito = pulisciNotazioneMatematica(data.choices[0].message.content);
+        return { ok: true, testo: testoPulito };
 
     } catch (error) {
         console.error('❌ Errore Scaleway:', error.message);
@@ -408,6 +443,92 @@ Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, m
 // Mathpix v3/text: legge sia testo normale sia notazione matematica/
 // scientifica (formule, frazioni, esponenti, chimica) con precisione
 // molto più alta di un modello generico su questo tipo di contenuto.
+// Mathpix (e talvolta anche DeepSeek nella risposta finale) scrivono le
+// formule in LaTeX puro (es. "\frac{1}{2}", "x^{2}", "\boxed{-1}") invece
+// che in testo semplice. Questa funzione converte tutto in notazione
+// testuale leggibile in chat — la STESSA usata nel prompt di
+// chiamataOpenAIVisione (a/b, a^b, sqrt(a), *, :) — così il testo che
+// arriva all'IA e quello mostrato allo studente sono sempre coerenti,
+// indipendentemente da quale servizio ha generato/letto il testo.
+function pulisciNotazioneMatematica(testo) {
+    let t = testo;
+
+    // 1) Rimuove i delimitatori LaTeX inline/display, tenendo solo il contenuto
+    t = t.replace(/\\\(|\\\)/g, '');
+    t = t.replace(/\\\[|\\\]/g, '');
+    t = t.replace(/\$\$?/g, '');
+
+    // 2) \frac{a}{b} -> (a)/(b)  — gestisce anche i \dfrac e \tfrac
+    const risolviFrazioni = (s) => {
+        const regexFrac = /\\[dt]?frac\{([^{}]*)\}\{([^{}]*)\}/;
+        let precedente;
+        do {
+            precedente = s;
+            s = s.replace(regexFrac, '($1)/($2)');
+        } while (s !== precedente && regexFrac.test(s));
+        return s;
+    };
+    t = risolviFrazioni(t);
+
+    // 3) \sqrt{a} -> sqrt(a)   (anche \sqrt[n]{a} -> sqrt[n](a))
+    t = t.replace(/\\sqrt\[([^\]]*)\]\{([^{}]*)\}/g, 'sqrt[$1]($2)');
+    t = t.replace(/\\sqrt\{([^{}]*)\}/g, 'sqrt($1)');
+
+    // 4) Esponenti e pedici: x^{2} -> x^2, a_{1} -> a_1 (tolgo le graffe superflue)
+    t = t.replace(/\^\{([^{}]*)\}/g, '^$1');
+    t = t.replace(/_\{([^{}]*)\}/g, '_$1');
+
+    // 5) Simboli comuni -> notazione testuale
+    t = t
+        .replace(/\\cdot|\\times/g, '*')
+        .replace(/\\div/g, ':')
+        .replace(/\\pm/g, '+/-')
+        .replace(/\\neq/g, '!=')
+        .replace(/\\leq/g, '<=')
+        .replace(/\\geq/g, '>=')
+        .replace(/\\infty/g, 'infinito')
+        .replace(/\\pi/g, 'pi');
+
+    // 6) Toglie i comandi di testo tipo \text{...} -> ...
+    t = t.replace(/\\text\{([^{}]*)\}/g, '$1');
+
+    // 6b) \left( \right) \left[ \right] ecc. -> tiene solo la parentesi
+    t = t.replace(/\\left|\\right/g, '');
+
+    // 6c) Altri simboli comuni non coperti al punto 5
+    t = t
+        .replace(/\\in/g, '∈')
+        .replace(/\\notin/g, '∉')
+        .replace(/\\Rightarrow|\\implies/g, '=>')
+        .replace(/\\rightarrow|\\to/g, '->')
+        .replace(/\\ldots|\\cdots|\\dots/g, '...');
+
+    // 6d) Comandi con UN argomento tra graffe che si limitano a "decorare"
+    // il contenuto senza cambiarne il significato — es. \boxed{-1} -> -1,
+    // \mathbb{N} -> N, \mathbf{x} -> x, \overline{AB} -> AB. Ripetuto finché
+    // non restano più comandi così, per gestire eventuali annidamenti
+    // (es. \boxed{\mathbb{N}}).
+    const risolviComandiDecorativi = (s) => {
+        const regexDecor = /\\[a-zA-Z]+\{([^{}]*)\}/;
+        let precedente;
+        do {
+            precedente = s;
+            s = s.replace(regexDecor, '$1');
+        } while (s !== precedente && regexDecor.test(s));
+        return s;
+    };
+    t = risolviComandiDecorativi(t);
+
+    // 7) Pulizia finale: eventuali graffe e backslash residui non gestiti sopra,
+    // e spazi multipli lasciati dalle sostituzioni
+    t = t.replace(/[{}]/g, '');
+    t = t.replace(/\\([a-zA-Z]+)/g, '$1'); // comandi LaTeX non previsti: tiene solo il nome
+    t = t.replace(/[ \t]+/g, ' ');
+    t = t.replace(/ *\n */g, '\n');
+
+    return t.trim();
+}
+
 async function chiamataMathpixOCR(imageBase64, mimeType) {
     try {
         console.log('📤 Chiamata a Mathpix (foto->testo)...');
@@ -432,12 +553,14 @@ async function chiamataMathpixOCR(imageBase64, mimeType) {
         }
 
         const data = await response.json();
-        const testoLetto = (data.text || '').trim();
+        const testoGrezzo = (data.text || '').trim();
 
-        if (testoLetto === '') {
+        if (testoGrezzo === '') {
             console.log('⚠️ Mathpix non ha trovato testo leggibile.');
             return { ok: false, testo: '' };
         }
+
+        const testoLetto = pulisciNotazioneMatematica(testoGrezzo);
 
         console.log('✅ Risposta ricevuta da Mathpix!');
         return { ok: true, testo: testoLetto };
@@ -523,7 +646,11 @@ async function chiamataOpenAIVisione(imageBase64, mimeType, modalita) {
         }
 
         console.log('✅ Testo estratto dalla foto!');
-        return { ok: true, testo: data.choices[0].message.content };
+        // Stessa rete di sicurezza usata per Mathpix e DeepSeek: il prompt
+        // sopra chiede già notazione semplice, ma un LLM può comunque
+        // "ricadere" nell'abitudine del LaTeX.
+        const testoEstratto = pulisciNotazioneMatematica(data.choices[0].message.content);
+        return { ok: true, testo: testoEstratto };
 
     } catch (error) {
         console.error('❌ Errore OpenAI Vision:', error.message);
@@ -757,6 +884,46 @@ async function autorizzaEConsumaMessaggio(deviceId, fingerprintHash, req, option
         };
     }
 
+    // Limite GIORNALIERO per piano + tipo: evita che tutta la quota
+    // settimanale venga bruciata in un solo giorno. Controllato PRIMA di
+    // quello settimanale, perché è il vincolo più stretto/immediato.
+    let limiteGiornalieroPerPiano;
+    if (tipo === 'foto') {
+        limiteGiornalieroPerPiano = LIMITE_PRO_FOTO_GIORNALIERO; // il Base è già bloccato sopra
+    } else {
+        limiteGiornalieroPerPiano = pianoAttuale === 'pro' ? LIMITE_PRO_TESTO_GIORNALIERO : LIMITE_BASE_TESTO_GIORNALIERO;
+    }
+
+    const oggiMezzanotte = new Date();
+    oggiMezzanotte.setHours(0, 0, 0, 0);
+
+    const { count: contoTipoOggi, error: countTipoOggiError } = await supabase
+        .from('chat_messages')
+        .select('id', { count: 'exact', head: true })
+        .eq('device_id', deviceId)
+        .eq('role', 'user')
+        .eq('tipo', tipo)
+        .gte('created_at', oggiMezzanotte.toISOString());
+
+    if (countTipoOggiError) {
+        console.error('❌ Errore conteggio giornaliero per tipo:', countTipoOggiError);
+    } else if (contoTipoOggi >= limiteGiornalieroPerPiano) {
+        // Nota: lo status è diverso da 'LIMITE_GIORNALIERO' (già usato più sotto
+        // per il limite SETTIMANALE esaurito — nome storico un po' fuorviante,
+        // lasciato invariato per non rompere l'app se il client controlla
+        // quella stringa). Questo è il vero limite giornaliero.
+        return {
+            ok: false,
+            statusCode: 429,
+            body: {
+                status: 'LIMITE_GIORNALIERO_PIANO',
+                messaggio: `Hai raggiunto il limite giornaliero (${limiteGiornalieroPerPiano}) del piano ${pianoAttuale === 'pro' ? 'Pro' : 'Base'}. Torna domani per continuare — la quota settimanale resta comunque a tua disposizione nei prossimi giorni!`,
+                messaggiRimanenti: 0,
+                limite: limiteGiornalieroPerPiano,
+            }
+        };
+    }
+
     // Limite SETTIMANALE (non più giornaliero) specifico per piano + tipo (testo o foto).
     // Lo studente può usarlo come vuole durante la settimana (es. tutto nel weekend),
     // invece di perdere le domande dei giorni in cui non ha usato l'app.
@@ -800,7 +967,7 @@ async function autorizzaEConsumaMessaggio(deviceId, fingerprintHash, req, option
                 status: 'LIMITE_GIORNALIERO',
                 messaggio: `Hai raggiunto il limite settimanale del piano ${pianoAttuale === 'pro' ? 'Pro' : 'Base'}. Il conteggio si aggiorna giorno per giorno, torna a trovarci presto!`,
                 messaggiRimanenti: 0,
-                limite: limiteGiornaliero,
+                limite: limiteSettimanale,
             }
         };
     }
@@ -1597,13 +1764,17 @@ app.post('/api/foto-to-text', async (req, res) => {
 // Filtriamo sempre anche per modalità, per non mescolare conversazioni
 // diverse (es. passando da "Interrogami" a "Aiuto compiti").
 async function recuperaStorico(deviceId, modalita) {
+    // Ordiniamo per data DECRESCENTE + limit, per prendere le foto più
+    // RECENTI (non le primissime mai lette) quando ce ne sono più del
+    // tetto — poi le rimettiamo in ordine cronologico subito sotto.
     let queryFoto = supabase
         .from('chat_messages')
         .select('id, role, content')
         .eq('device_id', deviceId)
         .eq('tipo', 'foto')
         .in('role', ['user', 'assistant'])
-        .order('created_at', { ascending: true });
+        .order('created_at', { ascending: false })
+        .limit(MEMORIA_MAX_FOTO_STORICHE);
 
     let queryPrimo = supabase
         .from('chat_messages')
@@ -1647,8 +1818,10 @@ async function recuperaStorico(deviceId, modalita) {
     primoAnchor.forEach(m => idsGiaPresenti.add(m.id));
 
     // Le foto vanno aggiunte in ordine cronologico, prima di tutto il
-    // resto, sempre evitando i doppioni.
-    const fotoAnchor = (foto || []).filter(m => !idsGiaPresenti.has(m.id));
+    // resto, sempre evitando i doppioni. Il .reverse() qui rimette in
+    // ordine cronologico le foto, che la query sopra prende dalla più
+    // recente per rispettare il tetto MEMORIA_MAX_FOTO_STORICHE.
+    const fotoAnchor = (foto || []).reverse().filter(m => !idsGiaPresenti.has(m.id));
 
     return [...fotoAnchor, ...primoAnchor, ...recentiOrdinati].map(m => ({ role: m.role, content: m.content }));
 }
@@ -1752,16 +1925,24 @@ app.post('/api/chat', async (req, res) => {
 
         // ============================================================
         //  CONTROLLA CACHE (chiave = modalità + domanda)
+        //  Saltata del tutto per le modalità conversazionali (vedi
+        //  MODALITA_SENZA_CACHE sopra): lì la risposta giusta dipende dallo
+        //  storico, non solo dall'ultimo messaggio.
         // ============================================================
+        const usaCache = !MODALITA_SENZA_CACHE.includes(modalita);
         const hashDomanda = calcolaHash(`${modalita || ''}|${messaggioStudente}`);
-        const { data: rispostaCache, error: cacheReadError } = await supabase
-            .from('cache_risposte')
-            .select('risposta, created_at')
-            .eq('hash', hashDomanda)
-            .maybeSingle();
+        let rispostaCache = null;
+        if (usaCache) {
+            const { data: rispostaCacheLetta, error: cacheReadError } = await supabase
+                .from('cache_risposte')
+                .select('risposta, created_at')
+                .eq('hash', hashDomanda)
+                .maybeSingle();
 
-        if (cacheReadError) {
-            console.error('❌ Errore lettura cache:', cacheReadError);
+            if (cacheReadError) {
+                console.error('❌ Errore lettura cache:', cacheReadError);
+            }
+            rispostaCache = rispostaCacheLetta;
         }
 
         if (rispostaCache) {
@@ -1802,9 +1983,9 @@ app.post('/api/chat', async (req, res) => {
             : { testoPulito: risultatoIA.testo, voto: null };
 
         // ============================================================
-        //  SALVA IN CACHE (se la risposta è valida)
+        //  SALVA IN CACHE (se la risposta è valida e la modalità la usa)
         // ============================================================
-        if (risultatoIA.ok && !testoPulito.includes('ERRORE')) {
+        if (usaCache && risultatoIA.ok && !testoPulito.includes('ERRORE')) {
             const { error: cacheWriteError } = await supabase
                 .from('cache_risposte')
                 .upsert({
