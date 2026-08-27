@@ -283,7 +283,7 @@ function validaInput({ messaggioStudente, nomeProf, modalita }) {
 // ============================================================
 const ISTRUZIONI_MODALITA = {
     spiegami_concetto: 'Lo studente ti chiede di spiegare un concetto che non ha capito. Spiegalo in modo semplice e diretto, con un esempio concreto o un\'analogia della vita reale, evitando paroloni inutili. Copri 2-3 aspetti/punti collegati del concetto nella stessa risposta (non fermarti al primo dettaglio isolato): l\'obiettivo è dare una spiegazione che si tenga insieme e sia già utile da sola, non frammentarla in troppi scambi separati.',
-    aiuto_compiti: 'Lo studente ha un esercizio da risolvere e vuole essere guidato, non la soluzione bella e pronta. Usa il metodo socratico: fai domande e dai indizi mirati, un passo alla volta, così arriva alla soluzione da solo.',
+    aiuto_compiti: 'Lo studente ha un esercizio da risolvere e vuole essere guidato, non la soluzione bella e pronta. Usa il metodo socratico: fai domande e dai indizi mirati, un passo alla volta, così arriva alla soluzione da solo.tranne che per la matematica e geografia',
     interrogami: 'Agisci come un professore che sta interrogando: fai una domanda alla volta sull\'argomento, aspetta la risposta, valutala brevemente, poi passa alla successiva. Dopo alcune domande, dai un voto orientativo (in decimi) e un consiglio su cosa ripassare. Se dai un voto, scrivilo sempre in questo formato esatto in una riga a parte: [VOTO_PREDITTIVO: X.X] seguito da una breve nota (es. "Pronto per la verifica di domani").',
     ripasso: 'Fai un ripasso completo e ben strutturato dell\'argomento portato dallo studente: copri TUTTI i concetti chiave principali dell\'argomento (non fermarti al primo, elencane almeno 4-6 se l\'argomento lo permette), ciascuno spiegato con 2-3 frasi chiare e un esempio pratico dove utile. Organizza il ripasso con elenchi puntati e grassetti sui termini importanti, così è facile da studiare e rileggere. Chiudi con 2-3 domande veloci per verificare che abbia capito. La priorità assoluta è la completezza e l\'utilità per studiare, non la simpatia.',
     correggi_compito: 'Lo studente ti mostra un compito o un esercizio già svolto (anche fotografato). Correggilo: dì chiaramente cosa è giusto, cosa è sbagliato e perché, e mostra come si risolve correttamente il punto sbagliato.',
@@ -348,7 +348,7 @@ Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, m
         const corpoRichiesta = {
             model: SCALEWAY_MODEL,
             messages,
-            max_tokens: 6000,
+            max_tokens: 10000,
             temperature: 0.85,
         };
         // reasoning_effort: regola QUANTO ragiona (non se ragiona) — "low"
