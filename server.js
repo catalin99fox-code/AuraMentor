@@ -334,17 +334,27 @@ Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, m
 
         messages.push({ role: 'user', content: messaggio });
 
-        // reasoning_effort: usato solo dai modelli che supportano il "pensiero"
-        // interno (es. gpt-oss-120b). Su DeepSeek V4 Flash viene ignorato senza
-        // causare errori. "low" tiene il modello veloce ed economico per una
-        // chat scolastica normale; puoi alzarlo da .env se serve più precisione.
+        // DeepSeek V4 Flash ha di default il "pensiero" interno (thinking)
+        // ATTIVO — consuma token dallo stesso budget della risposta finale,
+        // e su problemi confusi può "pensare" così tanto da esaurire tutti
+        // i token disponibili senza mai arrivare a scrivere una risposta
+        // (esattamente il bug che abbiamo appena risolto). Per un tutor
+        // scolastico conversazionale, risposte dirette sono più utili di un
+        // ragionamento nascosto che lo studente non vede comunque — quindi
+        // lo disattiviamo del tutto: risposte più veloci, più economiche, e
+        // niente più rischio di "risposta vuota per token finiti".
         const corpoRichiesta = {
             model: SCALEWAY_MODEL,
             messages,
-            max_tokens: 2500,
+            max_tokens: 2000,
             temperature: 0.85,
+            thinking: { type: 'disabled' },
         };
+        // Se in futuro servisse riattivare il ragionamento per certi casi
+        // (es. problemi molto complessi), basta impostare questa variabile
+        // d'ambiente — altrimenti resta disattivato di default (vedi sopra).
         if (SCALEWAY_REASONING_EFFORT) {
+            corpoRichiesta.thinking = { type: 'enabled' };
             corpoRichiesta.reasoning_effort = SCALEWAY_REASONING_EFFORT;
         }
 
@@ -367,7 +377,19 @@ Stile: sii amichevole, diretto e un po' brillante — MAI noioso o ripetitivo, m
 
         if (!data.choices || !data.choices[0] || !data.choices[0].message || data.choices[0].message.content == null) {
             console.error('❌ Risposta Scaleway malformata:', JSON.stringify(data));
-            return { ok: false, testo: 'ERRORE: Risposta non valida dal servizio AI.' };
+            // Caso specifico: il modello ha "ragionato" (reasoning) fino a
+            // esaurire i token disponibili, senza mai arrivare a scrivere
+            // una risposta vera — tipicamente su problemi descritti in modo
+            // confuso/contraddittorio (es. una foto letta male). Diamo un
+            // messaggio utile invece di un errore generico.
+            const contenutoNullo = data.choices?.[0]?.message?.content == null;
+            const haRagionatoTroppo = contenutoNullo && data.choices?.[0]?.finish_reason === 'length';
+            return {
+                ok: false,
+                testo: haRagionatoTroppo
+                    ? 'Il problema che hai scritto sembra un po\' confuso o incompleto (magari la foto è stata letta con qualche errore) — puoi provare a riscriverlo più chiaramente, magari passo per passo?'
+                    : 'ERRORE: Risposta non valida dal servizio AI.',
+            };
         }
 
         console.log('✅ Risposta ricevuta!');
