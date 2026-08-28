@@ -1350,6 +1350,26 @@ app.get('/api/revolut/debug-ordine/:orderId', async (req, res) => {
     }
 });
 
+// ⚠️ ENDPOINT TEMPORANEO DI DIAGNOSTICA — come sopra ma per un abbonamento
+// (subscription) specifico. Da rimuovere dopo l'uso.
+app.get('/api/revolut/debug-abbonamento/:subscriptionId', async (req, res) => {
+    if (!REVOLUT_API_KEY) {
+        return res.status(503).json({ error: 'REVOLUT_API_KEY non configurata' });
+    }
+    try {
+        const risposta = await fetch(`${REVOLUT_BASE_URL}/subscriptions/${req.params.subscriptionId}`, {
+            headers: {
+                'Authorization': `Bearer ${REVOLUT_API_KEY}`,
+                'Revolut-Api-Version': REVOLUT_API_VERSION,
+            },
+        });
+        const dati = await risposta.json();
+        res.json(dati);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Crea un cliente + abbonamento Revolut, restituisce il link a cui
 // mandare lo studente per completare il pagamento (Hosted Payment Page).
 // ⚠️ ENDPOINT TEMPORANEO DI DIAGNOSTICA — da rimuovere una volta trovati
@@ -1514,7 +1534,11 @@ app.post('/api/revolut/webhook', async (req, res) => {
             },
         });
         const datiOrdine = await rispostaOrdine.json();
-        const subscriptionId = datiOrdine?.subscription_id || datiOrdine?.metadata?.subscription_id;
+        // Confermato via /api/revolut/debug-ordine il 28/08/2026: il campo
+        // giusto è subscription_data.subscription_id (channel_data ha lo
+        // stesso valore duplicato, va bene anche quello come fallback).
+        const subscriptionId = datiOrdine?.subscription_data?.subscription_id
+            || datiOrdine?.channel_data?.subscription_id;
 
         if (!subscriptionId) {
             console.error('⚠️ Impossibile risalire all\'abbonamento dall\'ordine Revolut:', orderId);
