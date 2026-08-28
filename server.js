@@ -1290,6 +1290,27 @@ app.post('/api/accoppia-genitore', async (req, res) => {
 
 // Crea un cliente + abbonamento Revolut, restituisce il link a cui
 // mandare lo studente per completare il pagamento (Hosted Payment Page).
+// ⚠️ ENDPOINT TEMPORANEO DI DIAGNOSTICA — da rimuovere una volta trovati
+// gli ID corretti delle variazioni. Mostra la struttura reale dei piani
+// Revolut (incluse le variazioni), per capire quale ID usare davvero.
+app.get('/api/revolut/debug-piani', async (req, res) => {
+    if (!REVOLUT_API_KEY) {
+        return res.status(503).json({ error: 'REVOLUT_API_KEY non configurata' });
+    }
+    try {
+        const risposta = await fetch(`${REVOLUT_BASE_URL}/1.0/subscription-plans`, {
+            headers: {
+                'Authorization': `Bearer ${REVOLUT_API_KEY}`,
+                'Revolut-Api-Version': REVOLUT_API_VERSION,
+            },
+        });
+        const dati = await risposta.json();
+        res.json(dati);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.post('/api/revolut/crea-checkout', async (req, res) => {
     const { deviceId, piano } = req.body; // piano: 'base' oppure 'pro'
 
@@ -2300,6 +2321,7 @@ app.listen(PORT, () => {
     console.log(`🔑 API Key Scaleway: ${SCALEWAY_API_KEY ? '✅ Presente' : '❌ Manca'}`);
     console.log(`🖼️ API Key OpenAI (foto): ${OPENAI_API_KEY ? '✅ Presente' : '❌ Manca'}`);
     console.log(`🧮 Mathpix (lettura matematica): ${MATHPIX_APP_ID && MATHPIX_APP_KEY ? '✅ Attivo' : '⚠️ Non configurato, uso solo GPT-4o-mini'}`);
+    console.log(`💳 Revolut (pagamenti webapp): ${REVOLUT_API_KEY ? '✅ Attivo' : '⚠️ Non configurato'} — Webhook: ${REVOLUT_WEBHOOK_SECRET ? '✅ Configurato' : '⚠️ Non configurato'}`);
     console.log(`🔐 Supabase key: ${process.env.SUPABASE_SERVICE_KEY ? 'service_role ✅' : 'anon/altra (verifica RLS!) ⚠️'}`);
     console.log(`🌍 CORS: ${ALLOWED_ORIGINS.includes('*') ? 'Aperto a tutti (solo sviluppo!)' : ALLOWED_ORIGINS.join(', ')}`);
     console.log(`📦 Cache: ${CACHE_SCADENZA_GIORNI} giorni`);
