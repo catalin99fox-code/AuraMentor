@@ -1421,8 +1421,10 @@ app.post('/api/crea-ordine-revolut', async (req, res) => {
                 currency: 'EUR',
                 description: `Aura Mentor - Abbonamento ${piano}`,
                 // Ci serve nel webhook per sapere a quale device attivare
-                // l'abbonamento una volta arrivato il pagamento.
-                merchant_order_data: { reference: `${deviceId}|${piano}` },
+                // l'abbonamento una volta arrivato il pagamento. Il campo
+                // giusto per l'API Revolut è "merchant_order_ext_ref"
+                // (stringa semplice), non un oggetto annidato.
+                merchant_order_ext_ref: `${deviceId}|${piano}`,
             }),
         });
 
@@ -1472,7 +1474,10 @@ app.post('/api/webhook-revolut', async (req, res) => {
         const evento = req.body;
 
         if (evento.event === 'ORDER_COMPLETED') {
-            const riferimento = evento.data?.merchant_order_data?.reference || '';
+            // Campo piatto secondo la documentazione Revolut, es.:
+            // { "event": "ORDER_COMPLETED", "order_id": "...", "merchant_order_ext_ref": "..." }
+            // NON è annidato sotto data.merchant_order_data.
+            const riferimento = evento.merchant_order_ext_ref || '';
             const [deviceId, piano] = riferimento.split('|');
 
             if (!deviceId || !PREZZO_CENTESIMI_PER_PIANO_REVOLUT[piano]) {
