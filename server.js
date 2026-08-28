@@ -1347,6 +1347,45 @@ app.post('/api/verifica-acquisto-google', async (req, res) => {
 });
 
 // ============================================================
+//  SETUP UNA TANTUM: REGISTRA IL WEBHOOK SU REVOLUT
+//  Basta aprire questo indirizzo UNA VOLTA nel browser (dopo il deploy)
+//  per registrare il webhook presso Revolut. La risposta contiene il
+//  signing_secret — VA COPIATO subito in REVOLUT_WEBHOOK_SECRET su Render,
+//  perché non verrà mostrato di nuovo. Dopo averlo fatto una volta, questo
+//  endpoint si può anche rimuovere (non è pensato per essere chiamato più
+//  volte: creerebbe webhook duplicati).
+// ============================================================
+app.get('/api/setup-webhook-revolut', async (req, res) => {
+    if (!REVOLUT_SECRET_KEY) {
+        return res.status(500).json({ error: 'REVOLUT_SECRET_KEY non configurata' });
+    }
+    try {
+        const risposta = await fetch(`${REVOLUT_API_BASE}/api/1.0/webhooks`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${REVOLUT_SECRET_KEY}`,
+                'Revolut-Api-Version': REVOLUT_API_VERSION,
+            },
+            body: JSON.stringify({
+                url: 'https://auramentor.onrender.com/api/webhook-revolut',
+                events: ['ORDER_COMPLETED', 'ORDER_AUTHORISED'],
+            }),
+        });
+        const risultato = await risposta.json();
+        if (!risposta.ok) {
+            console.error('❌ Errore registrazione webhook:', risultato);
+            return res.status(502).json(risultato);
+        }
+        // ⚠️ Copia subito "signing_secret" da qui in REVOLUT_WEBHOOK_SECRET su Render
+        res.json(risultato);
+    } catch (error) {
+        console.error('❌ Errore setup-webhook-revolut:', error);
+        res.status(500).json({ error: 'Errore interno' });
+    }
+});
+
+// ============================================================
 //  NUOVA API: CREA ORDINE REVOLUT (webapp)
 //  Chiamata dalla webapp quando il genitore clicca "Abbonati". Crea un
 //  ordine sulla Merchant API di Revolut e restituisce il checkout_url a
