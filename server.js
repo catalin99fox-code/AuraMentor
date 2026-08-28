@@ -57,10 +57,13 @@ const REVOLUT_BASE_URL = process.env.REVOLUT_SANDBOX === 'true'
 const REVOLUT_API_VERSION = '2026-04-20';
 // ID delle VARIAZIONI dei due piani creati sul pannello Revolut Business
 // (NON l'id del piano genitore — Revolut vuole l'id della variazione,
-// es. quella "Mensile" dentro il piano "Base"). Si trovano visitando
-// /api/revolut/debug-piani e guardando dentro plan.variations[].id.
-const REVOLUT_PLAN_VARIATION_BASE = '48da1936-cbf7-4d18-9610-34ffb9bd90c5'; // ⚠️ da verificare/sostituire
-const REVOLUT_PLAN_VARIATION_PRO = '437610af-9d97-471f-99dd-8a63be2f7117'; // ⚠️ da verificare/sostituire
+// es. quella "Mensile" dentro il piano "Base"). Verificati via
+// /api/revolut/debug-piani il 28/08/2026 alle 20:11 — se in futuro riappare
+// questo stesso errore, ricontrollare PRIMA quale piano "Base" ha
+// state:"active" (ne esistono due, uno archiviato), invece di modificare
+// alla cieca.
+const REVOLUT_PLAN_VARIATION_BASE = '48da1936-cbf7-4d18-9610-34ffb9bd90c5'; // Base attivo, 2,99€
+const REVOLUT_PLAN_VARIATION_PRO = '437610af-9d97-471f-99dd-8a63be2f7117'; // Pro attivo, 8,99€
 // Chiave usata per verificare che i webhook in arrivo vengano davvero da
 // Revolut (e non da qualcuno che finge un pagamento riuscito).
 const REVOLUT_WEBHOOK_SECRET = process.env.REVOLUT_WEBHOOK_SECRET || '';
