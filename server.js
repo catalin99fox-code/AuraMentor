@@ -48,7 +48,29 @@ const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini';
 const MATHPIX_APP_ID = process.env.MATHPIX_APP_ID || '';
 const MATHPIX_APP_KEY = process.env.MATHPIX_APP_KEY || '';
 
-// NUOVO: configurazione Revolut Business (pagamenti genitori)
+// NUOVO: configurazione Revolut Business Merchant API (pagamenti genitori
+// tramite webapp, alternativa a Google Play Billing per chi non passa
+// dall'app Android).
+// REVOLUT_SECRET_KEY: Secret key generata da Revolut Business -> Impostazioni
+// -> APIs -> Merchant API -> Generate (usare la chiave Sandbox durante i
+// test, quella di Produzione solo a integrazione verificata).
+// REVOLUT_WEBHOOK_SECRET: chiave di firma del webhook, generata quando si
+// configura l'endpoint webhook lato Revolut (vedi sotto).
+// REVOLUT_API_BASE: https://sandbox-merchant.revolut.com in test,
+// https://merchant.revolut.com in produzione.
+const REVOLUT_SECRET_KEY = process.env.REVOLUT_SECRET_KEY || '';
+const REVOLUT_WEBHOOK_SECRET = process.env.REVOLUT_WEBHOOK_SECRET || '';
+const REVOLUT_API_BASE = process.env.REVOLUT_API_BASE || 'https://sandbox-merchant.revolut.com';
+const REVOLUT_API_VERSION = '2026-04-20';
+
+// Prezzi in centesimi (la Merchant API vuole l'importo nella denominazione
+// minima della valuta, per EUR sono i centesimi). Devono corrispondere ai
+// prezzi mostrati nell'app/webapp.
+const PREZZO_CENTESIMI_PER_PIANO_REVOLUT = {
+    base: 299,  // 2,99€
+    pro: 899,   // 8,99€
+};
+
 // NUOVO: configurazione Google Play Billing (verifica acquisti/abbonamenti)
 // GOOGLE_PACKAGE_NAME: il nome del pacchetto Android (es. net.iasmartproject.auramentor),
 // lo trovi in android/app/build.gradle.kts alla voce applicationId.
@@ -258,7 +280,14 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 app.use(cors({
     origin: ALLOWED_ORIGINS.includes('*') ? '*' : ALLOWED_ORIGINS,
 }));
-app.use(express.json({ limit: '10mb' }));
+// NUOVO: "verify" salva il corpo grezzo della richiesta in req.rawBody.
+// Serve SOLO per il webhook di Revolut (la firma va calcolata sul body
+// esattamente come arriva, prima che Express lo trasformi in oggetto JS) —
+// per tutte le altre route si continua a usare normalmente req.body.
+app.use(express.json({
+    limit: '10mb',
+    verify: (req, res, buf) => { req.rawBody = buf; }
+}));
 
 // ============================================================
 //  HOME
@@ -1314,6 +1343,130 @@ app.post('/api/verifica-acquisto-google', async (req, res) => {
     } catch (error) {
         console.error('❌ Errore verifica-acquisto-google:', error);
         res.status(500).json({ error: 'Errore interno' });
+    }
+});
+
+// ============================================================
+//  NUOVA API: CREA ORDINE REVOLUT (webapp)
+//  Chiamata dalla webapp quando il genitore clicca "Abbonati". Crea un
+//  ordine sulla Merchant API di Revolut e restituisce il checkout_url a
+//  cui reindirizzare il browser. L'attivazione VERA dell'abbonamento
+//  avviene solo dopo, quando arriva il webhook (vedi endpoint sotto) — qui
+//  ci limitiamo a creare l'ordine, non tocchiamo ancora il DB.
+// ============================================================
+app.post('/api/crea-ordine-revolut', async (req, res) => {
+    const { deviceId, piano } = req.body;
+
+    if (!deviceId || typeof deviceId !== 'string') {
+        return res.status(400).json({ error: 'deviceId mancante o non valido' });
+    }
+    const importoCentesimi = PREZZO_CENTESIMI_PER_PIANO_REVOLUT[piano];
+    if (!importoCentesimi) {
+        return res.status(400).json({ error: 'Piano non riconosciuto' });
+    }
+    if (!REVOLUT_SECRET_KEY) {
+        console.error('❌ REVOLUT_SECRET_KEY non configurata');
+        return res.status(500).json({ error: 'Pagamenti non configurati sul server' });
+    }
+
+    try {
+        const rispostaRevolut = await fetch(`${REVOLUT_API_BASE}/api/orders`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${REVOLUT_SECRET_KEY}`,
+                'Revolut-Api-Version': REVOLUT_API_VERSION,
+            },
+            body: JSON.stringify({
+                amount: importoCentesimi,
+                currency: 'EUR',
+                description: `Aura Mentor - Abbonamento ${piano}`,
+                // Ci serve nel webhook per sapere a quale device attivare
+                // l'abbonamento una volta arrivato il pagamento.
+                merchant_order_data: { reference: `${deviceId}|${piano}` },
+            }),
+        });
+
+        const ordine = await rispostaRevolut.json();
+        if (!rispostaRevolut.ok) {
+            console.error('❌ Errore creazione ordine Revolut:', ordine);
+            return res.status(502).json({ error: 'Errore nella creazione del pagamento' });
+        }
+
+        res.json({ status: 'OK', checkoutUrl: ordine.checkout_url });
+    } catch (error) {
+        console.error('❌ Errore crea-ordine-revolut:', error);
+        res.status(500).json({ error: 'Errore interno del server' });
+    }
+});
+
+// ============================================================
+//  WEBHOOK REVOLUT: attiva l'abbonamento quando il pagamento è confermato
+//  Chiamato DA Revolut (non dal browser del genitore) quando un ordine
+//  cambia stato. Attiviamo l'abbonamento SOLO sull'evento ORDER_COMPLETED,
+//  mai fidandosi del solo redirect del browser dopo il pagamento.
+// ============================================================
+app.post('/api/webhook-revolut', async (req, res) => {
+    try {
+        // Verifica della firma: senza questo controllo, chiunque conoscesse
+        // l'URL potrebbe chiamare l'endpoint a mano e fingere un pagamento
+        // mai avvenuto, sbloccando abbonamenti gratis.
+        const firmaRicevuta = req.headers['revolut-signature'];
+        const timestamp = req.headers['revolut-request-timestamp'];
+
+        if (!firmaRicevuta || !timestamp || !req.rawBody) {
+            console.error('❌ Webhook Revolut: intestazioni di firma mancanti');
+            return res.status(401).send('Firma mancante');
+        }
+
+        const payloadDaFirmare = `v1.${timestamp}.${req.rawBody}`;
+        const firmaAttesa = 'v1=' + crypto
+            .createHmac('sha256', REVOLUT_WEBHOOK_SECRET)
+            .update(payloadDaFirmare)
+            .digest('hex');
+
+        if (firmaRicevuta !== firmaAttesa) {
+            console.error('❌ Webhook Revolut: firma non valida');
+            return res.status(401).send('Firma non valida');
+        }
+
+        const evento = req.body;
+
+        if (evento.event === 'ORDER_COMPLETED') {
+            const riferimento = evento.data?.merchant_order_data?.reference || '';
+            const [deviceId, piano] = riferimento.split('|');
+
+            if (!deviceId || !PREZZO_CENTESIMI_PER_PIANO_REVOLUT[piano]) {
+                console.error('❌ Webhook Revolut: reference non valido:', riferimento);
+                return res.status(200).send('OK'); // rispondiamo comunque 200 per non far ritentare Revolut all'infinito su un ordine malformato
+            }
+
+            const scadenza = new Date();
+            scadenza.setMonth(scadenza.getMonth() + 1);
+
+            const { error } = await supabase
+                .from('users')
+                .upsert({
+                    device_id: deviceId,
+                    tipo_abbonamento: piano,
+                    scadenza_abbonamento: scadenza.toISOString(),
+                }, { onConflict: 'device_id' });
+
+            if (error) {
+                console.error('❌ Errore salvataggio abbonamento Revolut:', error);
+                return res.status(500).send('Errore interno');
+            }
+
+            console.log(`✅ Abbonamento ${piano} attivato via Revolut per device ${deviceId}`);
+        }
+
+        // Per tutti gli altri eventi (ORDER_PAYMENT_FAILED, ORDER_CANCELLED,
+        // ecc.) non facciamo nulla per ora — rispondiamo comunque 200 per
+        // dire a Revolut che l'evento è stato ricevuto correttamente.
+        res.status(200).send('OK');
+    } catch (error) {
+        console.error('❌ Errore webhook-revolut:', error);
+        res.status(500).send('Errore interno');
     }
 });
 
