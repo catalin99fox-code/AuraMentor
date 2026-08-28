@@ -1348,6 +1348,7 @@ app.post('/api/revolut/crea-checkout', async (req, res) => {
             console.error('❌ Errore creazione cliente Revolut:', JSON.stringify(datiCliente));
             return res.status(502).json({ error: 'Impossibile creare il profilo di pagamento.' });
         }
+        console.log(`✅ Cliente Revolut creato con successo, id=${datiCliente.id}`);
 
         // 2) Creiamo l'abbonamento vero e proprio, collegato al piano e
         // al cliente appena creati. external_reference ci permette di
