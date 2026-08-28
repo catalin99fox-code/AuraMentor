@@ -1389,9 +1389,11 @@ app.get('/api/setup-webhook-revolut', async (req, res) => {
 //  NUOVA API: CREA ORDINE REVOLUT (webapp)
 //  Chiamata dalla webapp quando il genitore clicca "Abbonati". Crea un
 //  ordine sulla Merchant API di Revolut e restituisce il checkout_url a
-//  cui reindirizzare il browser. L'attivazione VERA dell'abbonamento
-//  avviene solo dopo, quando arriva il webhook (vedi endpoint sotto) — qui
-//  ci limitiamo a creare l'ordine, non tocchiamo ancora il DB.
+//  cui reindirizzare il browser. Salviamo NOI la corrispondenza
+//  ordine -> device/piano nella tabella ordini_revolut, invece di
+//  affidarci a come Revolut restituisce (o non restituisce) il nostro
+//  riferimento: così il webhook, quando arriva, sa sempre a chi appartiene
+//  l'ordine senza doverlo indovinare.
 // ============================================================
 app.post('/api/crea-ordine-revolut', async (req, res) => {
     const { deviceId, piano } = req.body;
@@ -1420,11 +1422,6 @@ app.post('/api/crea-ordine-revolut', async (req, res) => {
                 amount: importoCentesimi,
                 currency: 'EUR',
                 description: `Aura Mentor - Abbonamento ${piano}`,
-                // Ci serve nel webhook per sapere a quale device attivare
-                // l'abbonamento una volta arrivato il pagamento. Il campo
-                // giusto per l'API Revolut è "merchant_order_ext_ref"
-                // (stringa semplice), non un oggetto annidato.
-                merchant_order_ext_ref: `${deviceId}|${piano}`,
             }),
         });
 
@@ -1432,6 +1429,18 @@ app.post('/api/crea-ordine-revolut', async (req, res) => {
         if (!rispostaRevolut.ok) {
             console.error('❌ Errore creazione ordine Revolut:', ordine);
             return res.status(502).json({ error: 'Errore nella creazione del pagamento' });
+        }
+
+        // Salviamo la corrispondenza PRIMA di restituire il checkoutUrl al
+        // browser, così è già pronta quando (pochi secondi/minuti dopo)
+        // arriverà il webhook di conferma pagamento.
+        const { error: erroreSalvataggio } = await supabase
+            .from('ordini_revolut')
+            .insert({ order_id: ordine.id, device_id: deviceId, piano });
+
+        if (erroreSalvataggio) {
+            console.error('❌ Errore salvataggio ordini_revolut:', erroreSalvataggio);
+            return res.status(500).json({ error: 'Errore interno del server' });
         }
 
         res.json({ status: 'OK', checkoutUrl: ordine.checkout_url });
@@ -1474,35 +1483,28 @@ app.post('/api/webhook-revolut', async (req, res) => {
         const evento = req.body;
 
         if (evento.event === 'ORDER_COMPLETED') {
-            // Il webhook di Revolut è volutamente minimale (contiene solo
-            // "event" e "order_id"): NON include il nostro riferimento.
-            // Va quindi recuperato con una seconda chiamata, interrogando
-            // l'ordine per intero.
-            const rispostaOrdine = await fetch(`${REVOLUT_API_BASE}/api/orders/${evento.order_id}`, {
-                headers: {
-                    'Authorization': `Bearer ${REVOLUT_SECRET_KEY}`,
-                    'Revolut-Api-Version': REVOLUT_API_VERSION,
-                },
-            });
-            const ordine = await rispostaOrdine.json();
+            // Cerchiamo la corrispondenza device/piano nella NOSTRA tabella
+            // ordini_revolut, salvata al momento della creazione
+            // dell'ordine — non nel webhook stesso (che è minimale, contiene
+            // solo "event" e "order_id") né nell'ordine restituito da
+            // Revolut (il campo di riferimento esterno non viene restituito
+            // in modo affidabile dalla loro API).
+            const { data: ordineSalvato, error: erroreLettura } = await supabase
+                .from('ordini_revolut')
+                .select('device_id, piano')
+                .eq('order_id', evento.order_id)
+                .maybeSingle();
 
-            if (!rispostaOrdine.ok) {
-                console.error('❌ Webhook Revolut: impossibile recuperare ordine', evento.order_id, ordine);
-                return res.status(200).send('OK');
+            if (erroreLettura) {
+                console.error('❌ Webhook Revolut: errore lettura ordini_revolut:', erroreLettura);
+                return res.status(500).send('Errore interno');
+            }
+            if (!ordineSalvato) {
+                console.error('❌ Webhook Revolut: nessun ordine salvato per order_id', evento.order_id);
+                return res.status(200).send('OK'); // ordine non nostro/non tracciato, ignoriamo senza far ritentare Revolut
             }
 
-            // 🔍 DEBUG TEMPORANEO: stampa l'ordine completo così vediamo il
-            // nome esatto del campo che contiene il nostro riferimento. Da
-            // togliere una volta confermato.
-            console.log('🔍 DEBUG ordine completo:', JSON.stringify(ordine, null, 2));
-
-            const riferimento = ordine.merchant_order_ext_ref || ordine.merchant_order_data?.reference || '';
-            const [deviceId, piano] = riferimento.split('|');
-
-            if (!deviceId || !PREZZO_CENTESIMI_PER_PIANO_REVOLUT[piano]) {
-                console.error('❌ Webhook Revolut: reference non valido:', riferimento);
-                return res.status(200).send('OK'); // rispondiamo comunque 200 per non far ritentare Revolut all'infinito su un ordine malformato
-            }
+            const { device_id: deviceId, piano } = ordineSalvato;
 
             const scadenza = new Date();
             scadenza.setMonth(scadenza.getMonth() + 1);
