@@ -1473,17 +1473,30 @@ app.post('/api/webhook-revolut', async (req, res) => {
 
         const evento = req.body;
 
-        // 🔍 DEBUG TEMPORANEO: stampa il payload esatto ricevuto da Revolut,
-        // così vediamo con certezza in che campo si trova il nostro
-        // riferimento, invece di continuare a indovinare dalla
-        // documentazione. Da togliere una volta risolto.
-        console.log('🔍 DEBUG webhook Revolut, payload completo:', JSON.stringify(evento, null, 2));
-
         if (evento.event === 'ORDER_COMPLETED') {
-            // Campo piatto secondo la documentazione Revolut, es.:
-            // { "event": "ORDER_COMPLETED", "order_id": "...", "merchant_order_ext_ref": "..." }
-            // NON è annidato sotto data.merchant_order_data.
-            const riferimento = evento.merchant_order_ext_ref || '';
+            // Il webhook di Revolut è volutamente minimale (contiene solo
+            // "event" e "order_id"): NON include il nostro riferimento.
+            // Va quindi recuperato con una seconda chiamata, interrogando
+            // l'ordine per intero.
+            const rispostaOrdine = await fetch(`${REVOLUT_API_BASE}/api/orders/${evento.order_id}`, {
+                headers: {
+                    'Authorization': `Bearer ${REVOLUT_SECRET_KEY}`,
+                    'Revolut-Api-Version': REVOLUT_API_VERSION,
+                },
+            });
+            const ordine = await rispostaOrdine.json();
+
+            if (!rispostaOrdine.ok) {
+                console.error('❌ Webhook Revolut: impossibile recuperare ordine', evento.order_id, ordine);
+                return res.status(200).send('OK');
+            }
+
+            // 🔍 DEBUG TEMPORANEO: stampa l'ordine completo così vediamo il
+            // nome esatto del campo che contiene il nostro riferimento. Da
+            // togliere una volta confermato.
+            console.log('🔍 DEBUG ordine completo:', JSON.stringify(ordine, null, 2));
+
+            const riferimento = ordine.merchant_order_ext_ref || ordine.merchant_order_data?.reference || '';
             const [deviceId, piano] = riferimento.split('|');
 
             if (!deviceId || !PREZZO_CENTESIMI_PER_PIANO_REVOLUT[piano]) {
