@@ -1473,6 +1473,12 @@ app.post('/api/webhook-revolut', async (req, res) => {
 
         const evento = req.body;
 
+        // 🔍 DEBUG TEMPORANEO: stampa il payload esatto ricevuto da Revolut,
+        // così vediamo con certezza in che campo si trova il nostro
+        // riferimento, invece di continuare a indovinare dalla
+        // documentazione. Da togliere una volta risolto.
+        console.log('🔍 DEBUG webhook Revolut, payload completo:', JSON.stringify(evento, null, 2));
+
         if (evento.event === 'ORDER_COMPLETED') {
             // Campo piatto secondo la documentazione Revolut, es.:
             // { "event": "ORDER_COMPLETED", "order_id": "...", "merchant_order_ext_ref": "..." }
