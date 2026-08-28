@@ -11,6 +11,7 @@
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
+const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
 const { google } = require('googleapis'); // per verificare gli acquisti Google Play Billing
 require('dotenv').config();
@@ -262,7 +263,7 @@ app.use(express.json({ limit: '10mb' }));
 // ============================================================
 //  HOME
 // ============================================================
-app.get('/', (req, res) => {
+app.get('/status', (req, res) => {
     res.send(`
         <h1 style="color: #9b59b6;">🚀 Aura Mentor Server</h1>
         <p style="font-size: 18px; color: #333;">Server attivo su Scaleway!</p>
@@ -272,6 +273,16 @@ app.get('/', (req, res) => {
         <p style="font-size: 12px; color: #999;">Aura Mentor v2.2 - Chivasso, Italia 🇮🇹</p>
     `);
 });
+
+// ============================================================
+//  WEBAPP (Flutter Web) — serve i file compilati per browser/iOS
+// ============================================================
+// I file vanno copiati dentro server/public/ dopo ogni
+// `flutter build web --release` nel progetto Flutter (vedi istruzioni
+// separate). Se la cartella non esiste ancora, questa riga non causa
+// errori — semplicemente le richieste passano oltre finché non viene
+// creata la cartella con i file veri.
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ============================================================
 //  UTILITY: HASH E TOKEN
@@ -2041,6 +2052,25 @@ app.post('/api/chat', async (req, res) => {
         console.error('❌ Errore chat:', error);
         return res.status(500).json({ error: 'Errore interno del server' });
     }
+});
+
+// ============================================================
+//  FALLBACK WEBAPP: qualsiasi indirizzo non riconosciuto (che non sia
+//  un endpoint /api/...) restituisce index.html della webapp — serve
+//  perché, ricaricando la pagina su un indirizzo "interno" della
+//  webapp, il browser chiede quell'indirizzo direttamente al server,
+//  che altrimenti risponderebbe "non trovato" invece di far ripartire
+//  l'app. Va messo per ultimo, dopo tutte le altre route.
+// ============================================================
+app.get(/^(?!\/api).*/, (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'), (err) => {
+        if (err) {
+            // La cartella public/ non esiste ancora (webapp non ancora
+            // compilata/caricata) — evitiamo un errore brutto, rispondiamo
+            // semplicemente "non trovato" invece di far crashare la richiesta.
+            res.status(404).send('Webapp non ancora disponibile.');
+        }
+    });
 });
 
 // ============================================================
