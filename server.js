@@ -48,29 +48,21 @@ const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini';
 const MATHPIX_APP_ID = process.env.MATHPIX_APP_ID || '';
 const MATHPIX_APP_KEY = process.env.MATHPIX_APP_KEY || '';
 
-// NUOVO: configurazione Revolut Business Merchant API (pagamenti genitori
-// tramite webapp, alternativa a Google Play Billing per chi non passa
-// dall'app Android).
-// REVOLUT_SECRET_KEY: Secret key generata da Revolut Business -> Impostazioni
-// -> APIs -> Merchant API -> Generate (usare la chiave Sandbox durante i
-// test, quella di Produzione solo a integrazione verificata).
-// REVOLUT_WEBHOOK_SECRET: chiave di firma del webhook, generata quando si
-// configura l'endpoint webhook lato Revolut (vedi sotto).
-// REVOLUT_API_BASE: https://sandbox-merchant.revolut.com in test,
-// https://merchant.revolut.com in produzione.
-const REVOLUT_SECRET_KEY = process.env.REVOLUT_SECRET_KEY || '';
-const REVOLUT_WEBHOOK_SECRET = process.env.REVOLUT_WEBHOOK_SECRET || '';
-const REVOLUT_API_BASE = process.env.REVOLUT_API_BASE || 'https://sandbox-merchant.revolut.com';
+// Revolut Business (Merchant API): pagamenti per la webapp (iOS/web),
+// dove Google Play Billing non è disponibile.
+const REVOLUT_API_KEY = process.env.REVOLUT_API_KEY || '';
+const REVOLUT_BASE_URL = process.env.REVOLUT_SANDBOX === 'true'
+    ? 'https://sandbox-merchant.revolut.com/api'
+    : 'https://merchant.revolut.com/api';
 const REVOLUT_API_VERSION = '2026-04-20';
+// ID dei due piani creati sul pannello Revolut Business.
+const REVOLUT_PLAN_BASE = '48da1936-cbf7-4d18-9610-34ffb9bd90c5';
+const REVOLUT_PLAN_PRO = '437610af-9d97-471f-99dd-8a63be2f7117';
+// Chiave usata per verificare che i webhook in arrivo vengano davvero da
+// Revolut (e non da qualcuno che finge un pagamento riuscito).
+const REVOLUT_WEBHOOK_SECRET = process.env.REVOLUT_WEBHOOK_SECRET || '';
 
-// Prezzi in centesimi (la Merchant API vuole l'importo nella denominazione
-// minima della valuta, per EUR sono i centesimi). Devono corrispondere ai
-// prezzi mostrati nell'app/webapp.
-const PREZZO_CENTESIMI_PER_PIANO_REVOLUT = {
-    base: 299,  // 2,99€
-    pro: 899,   // 8,99€
-};
-
+// NUOVO: configurazione Revolut Business (pagamenti genitori)
 // NUOVO: configurazione Google Play Billing (verifica acquisti/abbonamenti)
 // GOOGLE_PACKAGE_NAME: il nome del pacchetto Android (es. net.iasmartproject.auramentor),
 // lo trovi in android/app/build.gradle.kts alla voce applicationId.
@@ -280,13 +272,13 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 app.use(cors({
     origin: ALLOWED_ORIGINS.includes('*') ? '*' : ALLOWED_ORIGINS,
 }));
-// NUOVO: "verify" salva il corpo grezzo della richiesta in req.rawBody.
-// Serve SOLO per il webhook di Revolut (la firma va calcolata sul body
-// esattamente come arriva, prima che Express lo trasformi in oggetto JS) —
-// per tutte le altre route si continua a usare normalmente req.body.
+// Catturiamo anche il "corpo grezzo" (rawBody) di ogni richiesta: serve
+// specificamente per verificare la firma dei webhook Revolut, che deve
+// essere calcolata sui byte esatti originali, non sul JSON già "rifatto"
+// da Express — anche uno spazio in più cambierebbe la firma.
 app.use(express.json({
     limit: '10mb',
-    verify: (req, res, buf) => { req.rawBody = buf; }
+    verify: (req, res, buf) => { req.rawBody = buf; },
 }));
 
 // ============================================================
@@ -1292,6 +1284,203 @@ app.post('/api/accoppia-genitore', async (req, res) => {
 //  per sbloccarsi da sola non appena il genitore ha pagato)
 // ============================================================
 // ============================================================
+//  NUOVA API: PAGAMENTI REVOLUT (per webapp/iOS, dove Google Play
+//  Billing non è disponibile)
+// ============================================================
+
+// Crea un cliente + abbonamento Revolut, restituisce il link a cui
+// mandare lo studente per completare il pagamento (Hosted Payment Page).
+app.post('/api/revolut/crea-checkout', async (req, res) => {
+    const { deviceId, piano } = req.body; // piano: 'base' oppure 'pro'
+
+    if (!deviceId || typeof deviceId !== 'string') {
+        return res.status(400).json({ error: 'deviceId mancante o non valido' });
+    }
+    if (piano !== 'base' && piano !== 'pro') {
+        return res.status(400).json({ error: 'piano deve essere "base" o "pro"' });
+    }
+    if (!REVOLUT_API_KEY) {
+        console.error('❌ Tentativo di usare Revolut senza REVOLUT_API_KEY configurata');
+        return res.status(503).json({ error: 'Pagamento non disponibile al momento.' });
+    }
+
+    const planId = piano === 'pro' ? REVOLUT_PLAN_PRO : REVOLUT_PLAN_BASE;
+    const headersRevolut = {
+        'Authorization': `Bearer ${REVOLUT_API_KEY}`,
+        'Revolut-Api-Version': REVOLUT_API_VERSION,
+        'Content-Type': 'application/json',
+    };
+
+    try {
+        // 1) Creiamo un cliente Revolut per questo dispositivo. Non
+        // raccogliamo email vere nell'app, quindi ne generiamo una
+        // fittizia ma univoca, basata sul deviceId — serve solo a
+        // soddisfare il requisito dell'API, Revolut non la userà per
+        // mandare email vere allo studente.
+        const rispostaCliente = await fetch(`${REVOLUT_BASE_URL}/1.0/customers`, {
+            method: 'POST',
+            headers: headersRevolut,
+            body: JSON.stringify({ email: `${deviceId}@auramentor-utente.local` }),
+        });
+        const datiCliente = await rispostaCliente.json();
+        if (!rispostaCliente.ok) {
+            console.error('❌ Errore creazione cliente Revolut:', JSON.stringify(datiCliente));
+            return res.status(502).json({ error: 'Impossibile creare il profilo di pagamento.' });
+        }
+
+        // 2) Creiamo l'abbonamento vero e proprio, collegato al piano e
+        // al cliente appena creati. external_reference ci permette di
+        // ritrovare il deviceId più avanti (es. nel webhook), senza
+        // dover tenere una mappatura separata.
+        const rispostaAbbonamento = await fetch(`${REVOLUT_BASE_URL}/1.0/subscriptions`, {
+            method: 'POST',
+            headers: headersRevolut,
+            body: JSON.stringify({
+                plan_id: planId,
+                customer_id: datiCliente.id,
+                external_reference: deviceId,
+            }),
+        });
+        const datiAbbonamento = await rispostaAbbonamento.json();
+        if (!rispostaAbbonamento.ok) {
+            console.error('❌ Errore creazione abbonamento Revolut:', JSON.stringify(datiAbbonamento));
+            return res.status(502).json({ error: 'Impossibile creare l\'abbonamento.' });
+        }
+
+        // 3) L'abbonamento nasce "in sospeso", con un setup_order_id: lo
+        // usiamo per recuperare il vero checkout_url a cui mandare lo
+        // studente per pagare.
+        const rispostaOrdine = await fetch(
+            `${REVOLUT_BASE_URL}/1.0/orders/${datiAbbonamento.setup_order_id}`,
+            { headers: headersRevolut }
+        );
+        const datiOrdine = await rispostaOrdine.json();
+        if (!rispostaOrdine.ok || !datiOrdine.checkout_url) {
+            console.error('❌ Errore recupero ordine Revolut:', JSON.stringify(datiOrdine));
+            return res.status(502).json({ error: 'Impossibile generare il link di pagamento.' });
+        }
+
+        console.log(`💳 Checkout Revolut creato per device=${deviceId}, piano=${piano}`);
+        res.json({ checkoutUrl: datiOrdine.checkout_url });
+    } catch (error) {
+        console.error('❌ Errore Revolut checkout:', error.message);
+        res.status(500).json({ error: 'Errore interno durante la creazione del pagamento.' });
+    }
+});
+
+// Verifica che una richiesta webhook venga davvero da Revolut, calcolando
+// la firma HMAC-SHA256 sui byte esatti del corpo e confrontandola con
+// quella dichiarata nell'header — se qualcuno mandasse una richiesta finta
+// senza conoscere la chiave segreta, la firma calcolata non corrisponderebbe.
+function verificaFirmaWebhookRevolut(req) {
+    if (!REVOLUT_WEBHOOK_SECRET) {
+        console.error('⚠️ REVOLUT_WEBHOOK_SECRET non configurata: webhook NON verificato!');
+        return false;
+    }
+    const firmaHeader = req.headers['revolut-signature'];
+    const timestamp = req.headers['revolut-request-timestamp'];
+    if (!firmaHeader || !timestamp || !req.rawBody) return false;
+
+    const payloadDaFirmare = `v1.${timestamp}.${req.rawBody.toString('utf8')}`;
+    const firmaAttesa = 'v1=' + crypto
+        .createHmac('sha256', REVOLUT_WEBHOOK_SECRET)
+        .update(payloadDaFirmare, 'utf8')
+        .digest('hex');
+
+    // L'header può contenere più firme separate da virgola (durante la
+    // rotazione della chiave) — basta che una corrisponda.
+    const firmeRicevute = firmaHeader.split(',').map(f => f.trim());
+    return firmeRicevute.includes(firmaAttesa);
+}
+
+// Webhook Revolut: chiamato automaticamente da Revolut quando lo stato di
+// un ordine/abbonamento cambia (es. pagamento completato). Qui sblocchiamo
+// davvero l'abbonamento nel nostro database.
+app.post('/api/revolut/webhook', async (req, res) => {
+    if (!verificaFirmaWebhookRevolut(req)) {
+        console.error('❌ Webhook Revolut con firma non valida — richiesta rifiutata.');
+        return res.status(401).json({ error: 'Firma non valida' });
+    }
+
+    const evento = req.body;
+    console.log('🔔 Webhook Revolut ricevuto:', evento?.event || 'tipo sconosciuto');
+
+    try {
+        // Consideriamo "riuscito" solo un ordine completato/autorizzato —
+        // per qualsiasi altro tipo di evento, rispondiamo comunque 200
+        // (Revolut si aspetta una conferma di ricezione, altrimenti
+        // ritenta), ma non facciamo nulla.
+        const tipiEventoRiuscito = ['ORDER_COMPLETED', 'ORDER_AUTHORISED'];
+        if (!tipiEventoRiuscito.includes(evento?.event)) {
+            return res.status(200).json({ ricevuto: true });
+        }
+
+        const orderId = evento?.order_id || evento?.data?.id;
+        if (!orderId) {
+            console.error('⚠️ Webhook Revolut senza order_id utilizzabile:', JSON.stringify(evento));
+            return res.status(200).json({ ricevuto: true });
+        }
+
+        // Recuperiamo l'ordine per risalire all'abbonamento e al deviceId
+        // (salvato come external_reference in fase di creazione).
+        const rispostaOrdine = await fetch(`${REVOLUT_BASE_URL}/1.0/orders/${orderId}`, {
+            headers: {
+                'Authorization': `Bearer ${REVOLUT_API_KEY}`,
+                'Revolut-Api-Version': REVOLUT_API_VERSION,
+            },
+        });
+        const datiOrdine = await rispostaOrdine.json();
+        const subscriptionId = datiOrdine?.subscription_id || datiOrdine?.metadata?.subscription_id;
+
+        if (!subscriptionId) {
+            console.error('⚠️ Impossibile risalire all\'abbonamento dall\'ordine Revolut:', orderId);
+            return res.status(200).json({ ricevuto: true });
+        }
+
+        const rispostaAbbonamento = await fetch(`${REVOLUT_BASE_URL}/1.0/subscriptions/${subscriptionId}`, {
+            headers: {
+                'Authorization': `Bearer ${REVOLUT_API_KEY}`,
+                'Revolut-Api-Version': REVOLUT_API_VERSION,
+            },
+        });
+        const datiAbbonamento = await rispostaAbbonamento.json();
+        const deviceId = datiAbbonamento?.external_reference;
+        const planId = datiAbbonamento?.plan_id;
+
+        if (!deviceId) {
+            console.error('⚠️ Abbonamento Revolut senza external_reference (deviceId):', subscriptionId);
+            return res.status(200).json({ ricevuto: true });
+        }
+
+        const piano = planId === REVOLUT_PLAN_PRO ? 'pro' : 'base';
+        const scadenza = new Date();
+        scadenza.setMonth(scadenza.getMonth() + 1); // ciclo mensile
+
+        const { error: updateError } = await supabase
+            .from('users')
+            .upsert({
+                device_id: deviceId,
+                tipo_abbonamento: piano,
+                scadenza_abbonamento: scadenza.toISOString(),
+            }, { onConflict: 'device_id' });
+
+        if (updateError) {
+            console.error('❌ Errore aggiornamento abbonamento da webhook Revolut:', updateError);
+        } else {
+            console.log(`✅ Abbonamento ${piano} attivato via Revolut per device ${deviceId}`);
+        }
+
+        res.status(200).json({ ricevuto: true });
+    } catch (error) {
+        console.error('❌ Errore webhook Revolut:', error.message);
+        // Rispondiamo comunque 200: un errore nostro non deve far
+        // ritentare Revolut all'infinito lo stesso webhook.
+        res.status(200).json({ ricevuto: true });
+    }
+});
+
+// ============================================================
+// ============================================================
 //  NUOVA API: VERIFICA ACQUISTO GOOGLE PLAY
 //  Chiamata dall'app subito dopo che lo studente/genitore completa un
 //  abbonamento tramite Google Play Billing. Verifica presso Google che
@@ -1343,158 +1532,6 @@ app.post('/api/verifica-acquisto-google', async (req, res) => {
     } catch (error) {
         console.error('❌ Errore verifica-acquisto-google:', error);
         res.status(500).json({ error: 'Errore interno' });
-    }
-});
-
-
-
-// ============================================================
-//  NUOVA API: CREA ORDINE REVOLUT (webapp)
-//  Chiamata dalla webapp quando il genitore clicca "Abbonati". Crea un
-//  ordine sulla Merchant API di Revolut e restituisce il checkout_url a
-//  cui reindirizzare il browser. Salviamo NOI la corrispondenza
-//  ordine -> device/piano nella tabella ordini_revolut, invece di
-//  affidarci a come Revolut restituisce (o non restituisce) il nostro
-//  riferimento: così il webhook, quando arriva, sa sempre a chi appartiene
-//  l'ordine senza doverlo indovinare.
-// ============================================================
-app.post('/api/crea-ordine-revolut', async (req, res) => {
-    const { deviceId, piano } = req.body;
-
-    if (!deviceId || typeof deviceId !== 'string') {
-        return res.status(400).json({ error: 'deviceId mancante o non valido' });
-    }
-    const importoCentesimi = PREZZO_CENTESIMI_PER_PIANO_REVOLUT[piano];
-    if (!importoCentesimi) {
-        return res.status(400).json({ error: 'Piano non riconosciuto' });
-    }
-    if (!REVOLUT_SECRET_KEY) {
-        console.error('❌ REVOLUT_SECRET_KEY non configurata');
-        return res.status(500).json({ error: 'Pagamenti non configurati sul server' });
-    }
-
-    try {
-        const rispostaRevolut = await fetch(`${REVOLUT_API_BASE}/api/orders`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${REVOLUT_SECRET_KEY}`,
-                'Revolut-Api-Version': REVOLUT_API_VERSION,
-            },
-            body: JSON.stringify({
-                amount: importoCentesimi,
-                currency: 'EUR',
-                description: `Aura Mentor - Abbonamento ${piano}`,
-            }),
-        });
-
-        const ordine = await rispostaRevolut.json();
-        if (!rispostaRevolut.ok) {
-            console.error('❌ Errore creazione ordine Revolut:', ordine);
-            return res.status(502).json({ error: 'Errore nella creazione del pagamento' });
-        }
-
-        // Salviamo la corrispondenza PRIMA di restituire il checkoutUrl al
-        // browser, così è già pronta quando (pochi secondi/minuti dopo)
-        // arriverà il webhook di conferma pagamento.
-        const { error: erroreSalvataggio } = await supabase
-            .from('ordini_revolut')
-            .insert({ order_id: ordine.id, device_id: deviceId, piano });
-
-        if (erroreSalvataggio) {
-            console.error('❌ Errore salvataggio ordini_revolut:', erroreSalvataggio);
-            return res.status(500).json({ error: 'Errore interno del server' });
-        }
-
-        res.json({ status: 'OK', checkoutUrl: ordine.checkout_url });
-    } catch (error) {
-        console.error('❌ Errore crea-ordine-revolut:', error);
-        res.status(500).json({ error: 'Errore interno del server' });
-    }
-});
-
-// ============================================================
-//  WEBHOOK REVOLUT: attiva l'abbonamento quando il pagamento è confermato
-//  Chiamato DA Revolut (non dal browser del genitore) quando un ordine
-//  cambia stato. Attiviamo l'abbonamento SOLO sull'evento ORDER_COMPLETED,
-//  mai fidandosi del solo redirect del browser dopo il pagamento.
-// ============================================================
-app.post('/api/webhook-revolut', async (req, res) => {
-    try {
-        // Verifica della firma: senza questo controllo, chiunque conoscesse
-        // l'URL potrebbe chiamare l'endpoint a mano e fingere un pagamento
-        // mai avvenuto, sbloccando abbonamenti gratis.
-        const firmaRicevuta = req.headers['revolut-signature'];
-        const timestamp = req.headers['revolut-request-timestamp'];
-
-        if (!firmaRicevuta || !timestamp || !req.rawBody) {
-            console.error('❌ Webhook Revolut: intestazioni di firma mancanti');
-            return res.status(401).send('Firma mancante');
-        }
-
-        const payloadDaFirmare = `v1.${timestamp}.${req.rawBody}`;
-        const firmaAttesa = 'v1=' + crypto
-            .createHmac('sha256', REVOLUT_WEBHOOK_SECRET)
-            .update(payloadDaFirmare)
-            .digest('hex');
-
-        if (firmaRicevuta !== firmaAttesa) {
-            console.error('❌ Webhook Revolut: firma non valida');
-            return res.status(401).send('Firma non valida');
-        }
-
-        const evento = req.body;
-
-        if (evento.event === 'ORDER_COMPLETED') {
-            // Cerchiamo la corrispondenza device/piano nella NOSTRA tabella
-            // ordini_revolut, salvata al momento della creazione
-            // dell'ordine — non nel webhook stesso (che è minimale, contiene
-            // solo "event" e "order_id") né nell'ordine restituito da
-            // Revolut (il campo di riferimento esterno non viene restituito
-            // in modo affidabile dalla loro API).
-            const { data: ordineSalvato, error: erroreLettura } = await supabase
-                .from('ordini_revolut')
-                .select('device_id, piano')
-                .eq('order_id', evento.order_id)
-                .maybeSingle();
-
-            if (erroreLettura) {
-                console.error('❌ Webhook Revolut: errore lettura ordini_revolut:', erroreLettura);
-                return res.status(500).send('Errore interno');
-            }
-            if (!ordineSalvato) {
-                console.error('❌ Webhook Revolut: nessun ordine salvato per order_id', evento.order_id);
-                return res.status(200).send('OK'); // ordine non nostro/non tracciato, ignoriamo senza far ritentare Revolut
-            }
-
-            const { device_id: deviceId, piano } = ordineSalvato;
-
-            const scadenza = new Date();
-            scadenza.setMonth(scadenza.getMonth() + 1);
-
-            const { error } = await supabase
-                .from('users')
-                .upsert({
-                    device_id: deviceId,
-                    tipo_abbonamento: piano,
-                    scadenza_abbonamento: scadenza.toISOString(),
-                }, { onConflict: 'device_id' });
-
-            if (error) {
-                console.error('❌ Errore salvataggio abbonamento Revolut:', error);
-                return res.status(500).send('Errore interno');
-            }
-
-            console.log(`✅ Abbonamento ${piano} attivato via Revolut per device ${deviceId}`);
-        }
-
-        // Per tutti gli altri eventi (ORDER_PAYMENT_FAILED, ORDER_CANCELLED,
-        // ecc.) non facciamo nulla per ora — rispondiamo comunque 200 per
-        // dire a Revolut che l'evento è stato ricevuto correttamente.
-        res.status(200).send('OK');
-    } catch (error) {
-        console.error('❌ Errore webhook-revolut:', error);
-        res.status(500).send('Errore interno');
     }
 });
 
