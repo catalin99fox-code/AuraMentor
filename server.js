@@ -1570,6 +1570,9 @@ app.post('/api/revolut/webhook', async (req, res) => {
                 device_id: deviceId,
                 tipo_abbonamento: piano,
                 scadenza_abbonamento: scadenza.toISOString(),
+                // Salviamo l'id dell'abbonamento Revolut per poterlo
+                // cancellare in futuro su richiesta del genitore.
+                revolut_subscription_id: subscriptionId,
             }, { onConflict: 'device_id' });
 
         if (updateError) {
@@ -1584,6 +1587,65 @@ app.post('/api/revolut/webhook', async (req, res) => {
         // Rispondiamo comunque 200: un errore nostro non deve far
         // ritentare Revolut all'infinito lo stesso webhook.
         res.status(200).json({ ricevuto: true });
+    }
+});
+
+// ============================================================
+//  NUOVA API: CANCELLA ABBONAMENTO REVOLUT
+//  Permette al genitore/studente di disdire l'abbonamento in qualsiasi
+//  momento (diritto del consumatore). Cancella l'abbonamento su Revolut —
+//  nessun ulteriore addebito futuro — ma NON revoca l'accesso già pagato:
+//  lo studente resta Pro/Base fino alla scadenza_abbonamento già in corso,
+//  esattamente come ci si aspetta cancellando un abbonamento (si continua
+//  a usarlo fino alla fine del periodo già pagato, poi scade da solo).
+// ============================================================
+app.post('/api/revolut/cancella-abbonamento', async (req, res) => {
+    const { deviceId } = req.body;
+
+    if (!deviceId || typeof deviceId !== 'string') {
+        return res.status(400).json({ error: 'deviceId mancante o non valido' });
+    }
+    if (!REVOLUT_API_KEY) {
+        return res.status(503).json({ error: 'Revolut non configurato sul server' });
+    }
+
+    try {
+        const { data: utente, error: erroreLettura } = await supabase
+            .from('users')
+            .select('revolut_subscription_id')
+            .eq('device_id', deviceId)
+            .maybeSingle();
+
+        if (erroreLettura) {
+            console.error('❌ Errore lettura utente per cancellazione:', erroreLettura);
+            return res.status(500).json({ error: 'Errore interno' });
+        }
+        if (!utente?.revolut_subscription_id) {
+            return res.status(404).json({ error: 'Nessun abbonamento Revolut attivo trovato per questo device' });
+        }
+
+        const rispostaCancella = await fetch(
+            `${REVOLUT_BASE_URL}/subscriptions/${utente.revolut_subscription_id}/cancel`,
+            {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${REVOLUT_API_KEY}`,
+                    'Revolut-Api-Version': REVOLUT_API_VERSION,
+                },
+            }
+        );
+
+        if (!rispostaCancella.ok) {
+            const dettagli = await rispostaCancella.json().catch(() => ({}));
+            console.error('❌ Errore cancellazione abbonamento Revolut:', dettagli);
+            return res.status(502).json({ error: 'Impossibile cancellare l\'abbonamento presso Revolut' });
+        }
+
+        console.log(`✅ Abbonamento Revolut cancellato per device ${deviceId} (nessun futuro riaddebito, accesso valido fino alla scadenza già pagata)`);
+        res.json({ status: 'OK', messaggio: 'Abbonamento cancellato: nessun futuro addebito. L\'accesso resta attivo fino alla scadenza già pagata.' });
+    } catch (error) {
+        console.error('❌ Errore cancella-abbonamento:', error);
+        res.status(500).json({ error: 'Errore interno del server' });
     }
 });
 
