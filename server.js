@@ -427,14 +427,30 @@ Formule ed espressioni matematiche: NON usare MAI la notazione LaTeX (niente \\f
             corpoRichiesta.reasoning_effort = SCALEWAY_REASONING_EFFORT;
         }
 
-        const response = await fetch(`${SCALEWAY_BASE_URL}/chat/completions`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${SCALEWAY_API_KEY}`,
-            },
-            body: JSON.stringify(corpoRichiesta),
-        });
+        // Timeout lato server sulla chiamata a Scaleway: senza questo, se
+        // Scaleway smette di rispondere a metà (raro ma capitato), il
+        // server resta in attesa all'infinito — è il CLIENT a mollare dopo
+        // 90 secondi, lasciando la richiesta del server "appesa" nel vuoto,
+        // senza log di successo né di errore. Con AbortController, il
+        // server stesso rinuncia dopo 60s e risponde con un errore chiaro,
+        // lasciando margine prima che scatti il timeout del client.
+        const controllerTimeout = new AbortController();
+        const timeoutId = setTimeout(() => controllerTimeout.abort(), 60000);
+
+        let response;
+        try {
+            response = await fetch(`${SCALEWAY_BASE_URL}/chat/completions`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${SCALEWAY_API_KEY}`,
+                },
+                body: JSON.stringify(corpoRichiesta),
+                signal: controllerTimeout.signal,
+            });
+        } finally {
+            clearTimeout(timeoutId);
+        }
 
         if (!response.ok) {
             const errorText = await response.text();
@@ -469,6 +485,10 @@ Formule ed espressioni matematiche: NON usare MAI la notazione LaTeX (niente \\f
         return { ok: true, testo: testoPulito };
 
     } catch (error) {
+        if (error.name === 'AbortError') {
+            console.error('❌ Timeout Scaleway: nessuna risposta entro 60 secondi');
+            return { ok: false, testo: 'ERRORE: Il servizio AI ci sta mettendo troppo a rispondere. Riprova tra poco.' };
+        }
         console.error('❌ Errore Scaleway:', error.message);
         return { ok: false, testo: 'ERRORE: Impossibile elaborare la richiesta. Riprova più tardi.' };
     }
