@@ -730,7 +730,7 @@ async function controllaFingerprint(deviceId, fingerprintHash) {
 
     const { data: esistente, error } = await supabase
         .from('fingerprints')
-        .select('device_id')
+        .select('device_id, fingerprint_dati')
         .eq('fingerprint_hash', fingerprintHash)
         .maybeSingle();
 
@@ -742,6 +742,29 @@ async function controllaFingerprint(deviceId, fingerprintHash) {
     }
 
     if (esistente && esistente.device_id !== deviceId) {
+        // Sul WEB, il fingerprint (nome browser, user agent) è un segnale
+        // debole per design (non esistono ID hardware stabili in un
+        // browser — vedi commento in device_service.dart). Su iOS in
+        // particolare, TUTTI i browser (Chrome, Safari, ecc.) usano lo
+        // stesso motore WebKit per obbligo di Apple: un utente che passa
+        // da Chrome a Safari sullo stesso telefono (es. per poter fare
+        // "Aggiungi a Home", possibile solo da Safari) può risultare con
+        // un fingerprint praticamente identico, pur essendo la stessa
+        // persona in buona fede. Blocare qui darebbe un falso positivo
+        // sistematico — quindi sul web logghiamo per visibilità ma NON
+        // blocchiamo. Il vero anti-frode sul web resta il deviceId
+        // salvato nello storage del browser (si perde solo pulendo i dati
+        // del sito, non cambiando browser). Su Android/iOS nativo invece
+        // i dati hardware sono affidabili, e lì il blocco resta pieno.
+        const piattaforma = esistente.fingerprint_dati?.piattaforma;
+        if (piattaforma === 'web') {
+            console.warn(`⚠️ Fingerprint duplicato su WEB (non bloccato): device attuale=${deviceId}, device originale=${esistente.device_id}`);
+            // Non blocchiamo, ma non aggiorniamo nemmeno il fingerprint
+            // esistente su questo hash (resta associato al device originale):
+            // evitiamo così di "rubare" la riga a chi l'ha registrata prima.
+            return { bloccato: false };
+        }
+
         const { error: insertFrodeError } = await supabase
             .from('segnalazioni_frode')
             .insert({
@@ -1083,7 +1106,7 @@ app.post('/api/registra-fingerprint', async (req, res) => {
     try {
         const { data: esistente, error: fetchError } = await supabase
             .from('fingerprints')
-            .select('device_id')
+            .select('device_id, fingerprint_dati')
             .eq('fingerprint_hash', fingerprintHash)
             .maybeSingle();
 
@@ -1092,7 +1115,16 @@ app.post('/api/registra-fingerprint', async (req, res) => {
             return res.status(500).json({ error: 'Errore interno' });
         }
 
-        if (esistente && esistente.device_id !== deviceId) {
+        // Stessa eccezione web di controllaFingerprint() (vedi commento lì
+        // per il motivo): su iOS in particolare, cambiare browser (es. da
+        // Chrome a Safari per poter fare "Aggiungi a Home") può produrre
+        // un fingerprint praticamente identico pur essendo la stessa
+        // persona in buona fede — bloccare qui darebbe un falso positivo.
+        const piattaformaRichiesta = fingerprint?.piattaforma;
+        const piattaformaEsistente = esistente?.fingerprint_dati?.piattaforma;
+        const eccezioneWeb = piattaformaRichiesta === 'web' || piattaformaEsistente === 'web';
+
+        if (esistente && esistente.device_id !== deviceId && !eccezioneWeb) {
             const { error: insertFrodeError } = await supabase
                 .from('segnalazioni_frode')
                 .insert({
@@ -1110,6 +1142,10 @@ app.post('/api/registra-fingerprint', async (req, res) => {
                 status: 'BLOCCATO',
                 messaggio: 'Questo dispositivo è già stato utilizzato. I messaggi gratuiti non sono disponibili.'
             });
+        }
+
+        if (esistente && esistente.device_id !== deviceId && eccezioneWeb) {
+            console.warn(`⚠️ Fingerprint duplicato su WEB (non bloccato): device attuale=${deviceId}, device originale=${esistente.device_id}`);
         }
 
         // L'utente potrebbe non esistere ancora in questo momento (viene
