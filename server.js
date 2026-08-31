@@ -55,9 +55,15 @@ const REVOLUT_BASE_URL = process.env.REVOLUT_SANDBOX === 'true'
     ? 'https://sandbox-merchant.revolut.com/api'
     : 'https://merchant.revolut.com/api';
 const REVOLUT_API_VERSION = '2026-04-20';
-// ID dei due piani creati sul pannello Revolut Business.
-const REVOLUT_PLAN_BASE = '48da1936-cbf7-4d18-9610-34ffb9bd90c5';
-const REVOLUT_PLAN_PRO = '437610af-9d97-471f-99dd-8a63be2f7117';
+// ID delle VARIAZIONI dei due piani creati sul pannello Revolut Business
+// (NON l'id del piano genitore — Revolut vuole l'id della variazione,
+// es. quella "Mensile" dentro il piano "Base"). Verificati via
+// /api/revolut/debug-piani il 28/08/2026 alle 20:11 — se in futuro riappare
+// questo stesso errore, ricontrollare PRIMA quale piano "Base" ha
+// state:"active" (ne esistono due, uno archiviato), invece di modificare
+// alla cieca.
+const REVOLUT_PLAN_VARIATION_BASE = '48da1936-cbf7-4d18-9610-34ffb9bd90c5'; // Base attivo, 2,99€
+const REVOLUT_PLAN_VARIATION_PRO = '437610af-9d97-471f-99dd-8a63be2f7117'; // Pro attivo, 8,99€
 // Chiave usata per verificare che i webhook in arrivo vengano davvero da
 // Revolut (e non da qualcuno che finge un pagamento riuscito).
 const REVOLUT_WEBHOOK_SECRET = process.env.REVOLUT_WEBHOOK_SECRET || '';
@@ -1288,6 +1294,82 @@ app.post('/api/accoppia-genitore', async (req, res) => {
 //  Billing non è disponibile)
 // ============================================================
 
+// ⚠️ ENDPOINT TEMPORANEO — da visitare UNA VOLTA per registrare il webhook
+// di questo ambiente (sandbox o produzione, a seconda di quale REVOLUT_API_KEY
+// è attiva su Render in questo momento) per il percorso /api/revolut/webhook.
+// La risposta contiene "signing_secret" — va copiato subito in
+// REVOLUT_WEBHOOK_SECRET su Render. Rimuovere questo endpoint dopo l'uso.
+app.get('/api/revolut/setup-webhook', async (req, res) => {
+    if (!REVOLUT_API_KEY) {
+        return res.status(503).json({ error: 'REVOLUT_API_KEY non configurata' });
+    }
+    try {
+        const risposta = await fetch(`${REVOLUT_BASE_URL}/webhooks`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${REVOLUT_API_KEY}`,
+                'Revolut-Api-Version': REVOLUT_API_VERSION,
+            },
+            body: JSON.stringify({
+                url: 'https://auramentor.onrender.com/api/revolut/webhook',
+                events: ['ORDER_COMPLETED', 'ORDER_AUTHORISED'],
+            }),
+        });
+        const risultato = await risposta.json();
+        if (!risposta.ok) {
+            console.error('❌ Errore registrazione webhook subscriptions:', risultato);
+            return res.status(502).json(risultato);
+        }
+        // ⚠️ Copia subito "signing_secret" da qui in REVOLUT_WEBHOOK_SECRET su Render
+        res.json(risultato);
+    } catch (error) {
+        console.error('❌ Errore setup-webhook subscriptions:', error);
+        res.status(500).json({ error: 'Errore interno' });
+    }
+});
+
+// ⚠️ ENDPOINT TEMPORANEO DI DIAGNOSTICA — ispeziona un ordine specifico per
+// vedere la struttura reale restituita da Revolut, invece di indovinare i
+// nomi dei campi. Da rimuovere dopo l'uso.
+app.get('/api/revolut/debug-ordine/:orderId', async (req, res) => {
+    if (!REVOLUT_API_KEY) {
+        return res.status(503).json({ error: 'REVOLUT_API_KEY non configurata' });
+    }
+    try {
+        const risposta = await fetch(`${REVOLUT_BASE_URL}/orders/${req.params.orderId}`, {
+            headers: {
+                'Authorization': `Bearer ${REVOLUT_API_KEY}`,
+                'Revolut-Api-Version': REVOLUT_API_VERSION,
+            },
+        });
+        const dati = await risposta.json();
+        res.json(dati);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ⚠️ ENDPOINT TEMPORANEO DI DIAGNOSTICA — come sopra ma per un abbonamento
+// (subscription) specifico. Da rimuovere dopo l'uso.
+app.get('/api/revolut/debug-abbonamento/:subscriptionId', async (req, res) => {
+    if (!REVOLUT_API_KEY) {
+        return res.status(503).json({ error: 'REVOLUT_API_KEY non configurata' });
+    }
+    try {
+        const risposta = await fetch(`${REVOLUT_BASE_URL}/subscriptions/${req.params.subscriptionId}`, {
+            headers: {
+                'Authorization': `Bearer ${REVOLUT_API_KEY}`,
+                'Revolut-Api-Version': REVOLUT_API_VERSION,
+            },
+        });
+        const dati = await risposta.json();
+        res.json(dati);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Crea un cliente + abbonamento Revolut, restituisce il link a cui
 // mandare lo studente per completare il pagamento (Hosted Payment Page).
 // ⚠️ ENDPOINT TEMPORANEO DI DIAGNOSTICA — da rimuovere una volta trovati
@@ -1298,7 +1380,7 @@ app.get('/api/revolut/debug-piani', async (req, res) => {
         return res.status(503).json({ error: 'REVOLUT_API_KEY non configurata' });
     }
     try {
-        const risposta = await fetch(`${REVOLUT_BASE_URL}/1.0/subscription-plans`, {
+        const risposta = await fetch(`${REVOLUT_BASE_URL}/subscription-plans`, {
             headers: {
                 'Authorization': `Bearer ${REVOLUT_API_KEY}`,
                 'Revolut-Api-Version': REVOLUT_API_VERSION,
@@ -1325,7 +1407,7 @@ app.post('/api/revolut/crea-checkout', async (req, res) => {
         return res.status(503).json({ error: 'Pagamento non disponibile al momento.' });
     }
 
-    const planId = piano === 'pro' ? REVOLUT_PLAN_PRO : REVOLUT_PLAN_BASE;
+    const planVariationId = piano === 'pro' ? REVOLUT_PLAN_VARIATION_PRO : REVOLUT_PLAN_VARIATION_BASE;
     const headersRevolut = {
         'Authorization': `Bearer ${REVOLUT_API_KEY}`,
         'Revolut-Api-Version': REVOLUT_API_VERSION,
@@ -1338,7 +1420,7 @@ app.post('/api/revolut/crea-checkout', async (req, res) => {
         // fittizia ma univoca, basata sul deviceId — serve solo a
         // soddisfare il requisito dell'API, Revolut non la userà per
         // mandare email vere allo studente.
-        const rispostaCliente = await fetch(`${REVOLUT_BASE_URL}/1.0/customers`, {
+        const rispostaCliente = await fetch(`${REVOLUT_BASE_URL}/customers`, {
             method: 'POST',
             headers: headersRevolut,
             body: JSON.stringify({ email: `${deviceId}@auramentor-utente.local` }),
@@ -1354,11 +1436,11 @@ app.post('/api/revolut/crea-checkout', async (req, res) => {
         // al cliente appena creati. external_reference ci permette di
         // ritrovare il deviceId più avanti (es. nel webhook), senza
         // dover tenere una mappatura separata.
-        const rispostaAbbonamento = await fetch(`${REVOLUT_BASE_URL}/1.0/subscriptions`, {
+        const rispostaAbbonamento = await fetch(`${REVOLUT_BASE_URL}/subscriptions`, {
             method: 'POST',
             headers: headersRevolut,
             body: JSON.stringify({
-                plan_id: planId,
+                plan_variation_id: planVariationId,
                 customer_id: datiCliente.id,
                 external_reference: deviceId,
             }),
@@ -1373,7 +1455,7 @@ app.post('/api/revolut/crea-checkout', async (req, res) => {
         // usiamo per recuperare il vero checkout_url a cui mandare lo
         // studente per pagare.
         const rispostaOrdine = await fetch(
-            `${REVOLUT_BASE_URL}/1.0/orders/${datiAbbonamento.setup_order_id}`,
+            `${REVOLUT_BASE_URL}/orders/${datiAbbonamento.setup_order_id}`,
             { headers: headersRevolut }
         );
         const datiOrdine = await rispostaOrdine.json();
@@ -1445,21 +1527,25 @@ app.post('/api/revolut/webhook', async (req, res) => {
 
         // Recuperiamo l'ordine per risalire all'abbonamento e al deviceId
         // (salvato come external_reference in fase di creazione).
-        const rispostaOrdine = await fetch(`${REVOLUT_BASE_URL}/1.0/orders/${orderId}`, {
+        const rispostaOrdine = await fetch(`${REVOLUT_BASE_URL}/orders/${orderId}`, {
             headers: {
                 'Authorization': `Bearer ${REVOLUT_API_KEY}`,
                 'Revolut-Api-Version': REVOLUT_API_VERSION,
             },
         });
         const datiOrdine = await rispostaOrdine.json();
-        const subscriptionId = datiOrdine?.subscription_id || datiOrdine?.metadata?.subscription_id;
+        // Confermato via /api/revolut/debug-ordine il 28/08/2026: il campo
+        // giusto è subscription_data.subscription_id (channel_data ha lo
+        // stesso valore duplicato, va bene anche quello come fallback).
+        const subscriptionId = datiOrdine?.subscription_data?.subscription_id
+            || datiOrdine?.channel_data?.subscription_id;
 
         if (!subscriptionId) {
             console.error('⚠️ Impossibile risalire all\'abbonamento dall\'ordine Revolut:', orderId);
             return res.status(200).json({ ricevuto: true });
         }
 
-        const rispostaAbbonamento = await fetch(`${REVOLUT_BASE_URL}/1.0/subscriptions/${subscriptionId}`, {
+        const rispostaAbbonamento = await fetch(`${REVOLUT_BASE_URL}/subscriptions/${subscriptionId}`, {
             headers: {
                 'Authorization': `Bearer ${REVOLUT_API_KEY}`,
                 'Revolut-Api-Version': REVOLUT_API_VERSION,
@@ -1467,14 +1553,14 @@ app.post('/api/revolut/webhook', async (req, res) => {
         });
         const datiAbbonamento = await rispostaAbbonamento.json();
         const deviceId = datiAbbonamento?.external_reference;
-        const planId = datiAbbonamento?.plan_id;
+        const planVariationId = datiAbbonamento?.plan_variation_id;
 
         if (!deviceId) {
             console.error('⚠️ Abbonamento Revolut senza external_reference (deviceId):', subscriptionId);
             return res.status(200).json({ ricevuto: true });
         }
 
-        const piano = planId === REVOLUT_PLAN_PRO ? 'pro' : 'base';
+        const piano = planVariationId === REVOLUT_PLAN_VARIATION_PRO ? 'pro' : 'base';
         const scadenza = new Date();
         scadenza.setMonth(scadenza.getMonth() + 1); // ciclo mensile
 
@@ -1484,6 +1570,9 @@ app.post('/api/revolut/webhook', async (req, res) => {
                 device_id: deviceId,
                 tipo_abbonamento: piano,
                 scadenza_abbonamento: scadenza.toISOString(),
+                // Salviamo l'id dell'abbonamento Revolut per poterlo
+                // cancellare in futuro su richiesta del genitore.
+                revolut_subscription_id: subscriptionId,
             }, { onConflict: 'device_id' });
 
         if (updateError) {
@@ -1498,6 +1587,65 @@ app.post('/api/revolut/webhook', async (req, res) => {
         // Rispondiamo comunque 200: un errore nostro non deve far
         // ritentare Revolut all'infinito lo stesso webhook.
         res.status(200).json({ ricevuto: true });
+    }
+});
+
+// ============================================================
+//  NUOVA API: CANCELLA ABBONAMENTO REVOLUT
+//  Permette al genitore/studente di disdire l'abbonamento in qualsiasi
+//  momento (diritto del consumatore). Cancella l'abbonamento su Revolut —
+//  nessun ulteriore addebito futuro — ma NON revoca l'accesso già pagato:
+//  lo studente resta Pro/Base fino alla scadenza_abbonamento già in corso,
+//  esattamente come ci si aspetta cancellando un abbonamento (si continua
+//  a usarlo fino alla fine del periodo già pagato, poi scade da solo).
+// ============================================================
+app.post('/api/revolut/cancella-abbonamento', async (req, res) => {
+    const { deviceId } = req.body;
+
+    if (!deviceId || typeof deviceId !== 'string') {
+        return res.status(400).json({ error: 'deviceId mancante o non valido' });
+    }
+    if (!REVOLUT_API_KEY) {
+        return res.status(503).json({ error: 'Revolut non configurato sul server' });
+    }
+
+    try {
+        const { data: utente, error: erroreLettura } = await supabase
+            .from('users')
+            .select('revolut_subscription_id')
+            .eq('device_id', deviceId)
+            .maybeSingle();
+
+        if (erroreLettura) {
+            console.error('❌ Errore lettura utente per cancellazione:', erroreLettura);
+            return res.status(500).json({ error: 'Errore interno' });
+        }
+        if (!utente?.revolut_subscription_id) {
+            return res.status(404).json({ error: 'Nessun abbonamento Revolut attivo trovato per questo device' });
+        }
+
+        const rispostaCancella = await fetch(
+            `${REVOLUT_BASE_URL}/subscriptions/${utente.revolut_subscription_id}/cancel`,
+            {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${REVOLUT_API_KEY}`,
+                    'Revolut-Api-Version': REVOLUT_API_VERSION,
+                },
+            }
+        );
+
+        if (!rispostaCancella.ok) {
+            const dettagli = await rispostaCancella.json().catch(() => ({}));
+            console.error('❌ Errore cancellazione abbonamento Revolut:', dettagli);
+            return res.status(502).json({ error: 'Impossibile cancellare l\'abbonamento presso Revolut' });
+        }
+
+        console.log(`✅ Abbonamento Revolut cancellato per device ${deviceId} (nessun futuro riaddebito, accesso valido fino alla scadenza già pagata)`);
+        res.json({ status: 'OK', messaggio: 'Abbonamento cancellato: nessun futuro addebito. L\'accesso resta attivo fino alla scadenza già pagata.' });
+    } catch (error) {
+        console.error('❌ Errore cancella-abbonamento:', error);
+        res.status(500).json({ error: 'Errore interno del server' });
     }
 });
 
